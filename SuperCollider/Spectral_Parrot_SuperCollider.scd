@@ -27,7 +27,7 @@ s.options.inDevice_(
 );
 
 ~minFreq = 50;
-~maxfreq = 5000;
+~maxfreq = 8000;
 ~freqStepSize = 0.05;
 ~oscFreqs = 8.collect{exprand(~minFreq, ~maxfreq)}.sort;
 ~freqStates = 8.collect{1};
@@ -119,13 +119,14 @@ createOSCHandler = {|name, key, port|
 					/*~oscSynth = 8.collect{|i| Synth(\oscillators, [\freqBus, ~oscFreqBusses[i], \ampBus, ~oscAmpBusses[i], \analysisBus, ~inputAudioBus,  \outChanMonitor, 19], target: ~audioGrp)};*/
 
 					~stringSynth = Synth(\strings, [\analysisBus, ~inputAudioBus, \stringGain, ~stringGain], target: ~audioGrp);
+				~analysisSynth = Synth(\analysis, [\inputAudioBus, ~inputAudioBus, \targetAudioBus, ~targetAudioBus], target: ~analysisGrp);
 					~updateTask = Task({
 						loop {
 							~updateDirection.value;
 							0.05.wait; // Update every 50ms
 						}
 					}).play;
-				~analysisSynth = Synth(\analysis, [\inputAudioBus, ~inputAudioBus, \targetAudioBus, ~targetAudioBus], target: ~analysisGrp);
+					s.sync;
 					running = True;
 				})
 			});
@@ -279,7 +280,7 @@ s.waitForBoot({
 		sumSigs = Mix(oscArray * sineAM);
 
 		// Output mixed signal
-		Out.ar([2, 3, 4, 5], sumSigs);
+		Out.ar(2, sumSigs);
 		Out.ar(analysisBus, sumSigs.scope);
 	}).add;
 
@@ -314,3 +315,5 @@ x.free
 
 
 ~stringGain[0].getSynchronous
+
+~stringSynth.free
