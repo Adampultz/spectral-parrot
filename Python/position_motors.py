@@ -8,6 +8,8 @@ from Stepper_Control import DualESP32StepperController
 # Global variable to hold controller reference for signal handler
 motor_controller = None
 
+motor_speed_max = 500
+
 def emergency_shutdown(signum=None, frame=None):
     """Emergency shutdown procedure for motors"""
     global motor_controller
@@ -76,7 +78,7 @@ def interactive_motor_positioning(port1, port2, baudrate=115200):
     # Set initial speeds for all motors
     print("Setting initial speeds...")
     for motor in range(1, 9):
-        motor_controller.set_speed(motor, 30)
+        motor_controller.set_speed(motor, 100)
         time.sleep(0.1)
     
     print("\nMotor positioning commands:")
@@ -145,8 +147,8 @@ def interactive_motor_positioning(port1, port2, baudrate=115200):
                         print("Missing speed value")
                         continue
                     speed = int(parts[2])
-                    if speed < 0 or speed > 100:
-                        print("Speed should be between 0 and 100")
+                    if speed < 0 or speed > motor_speed_max:
+                        print(f"Speed should be between 0 and {motor_speed_max}")
                         continue
                     motor_controller.set_speed(motor, speed)
                     print(f"Set motor {motor} speed to {speed}")
