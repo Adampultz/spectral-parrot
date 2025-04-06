@@ -14,7 +14,7 @@ const int STEP_PINS[NUM_MOTORS] = {12, 27, 25, 19};
 #define TX_PIN           17      // UART TX pin
 
 // TMC2209 Driver addresses
-const uint8_t DRIVER_ADDRESSES[NUM_MOTORS] = {0b00, 0b01, 0b10, 0b11};
+const uint8_t DRIVER_ADDRESSES[NUM_MOTORS] = {0b00, 0b10, 0b01, 0b11};
 
 #define R_SENSE 0.11f // Match to your driver
 
@@ -28,6 +28,9 @@ int mSteps[NUM_MOTORS] = {256, 256, 256, 256};
 int accelSpeed[NUM_MOTORS] = {400, 400, 400, 400};
 long currentPosition[NUM_MOTORS] = {0, 0, 0, 0};
 long targetPosition[NUM_MOTORS] = {0, 0, 0, 0};
+
+const int varianceSize = 5;
+const int variance_threshold = 1000;
 
 // Add basic StallGuard variables - only these are new
 uint16_t stallGuardResult[NUM_MOTORS] = {0};
@@ -103,8 +106,26 @@ void setup() {
       Serial.println(" (unknown driver type)");
     }
     
-    delay(50); // Small delay between driver initializations
+    delay(100); // Small delay between driver initializations
   }
+
+delay(500);  // Give all drivers time to settle
+Serial.println("Verifying driver configurations:");
+
+for (int i = 0; i < NUM_MOTORS; i++) {
+  uint8_t version = drivers[i]->version();
+  uint8_t sgthrs = drivers[i]->SGTHRS();
+  uint8_t toff = drivers[i]->toff();
+  
+  Serial.print("Motor ");
+  Serial.print(i + 1);
+  Serial.print(" - Version: 0x");
+  Serial.print(version, HEX);
+  Serial.print(", SGTHRS: ");
+  Serial.print(sgthrs);
+  Serial.print(", TOFF: ");
+  Serial.println(toff);
+}
   
   // Test direct pin control
   Serial.println("Testing direct pin control...");
@@ -156,25 +177,81 @@ void setStallGuardThreshold(int motorIndex, int threshold) {
   }
 }
 
-// New simple function to check StallGuard values
 void checkStallGuard() {
   static uint32_t lastCheck = 0;
-  if (millis() - lastCheck < 500) { // Check every 500ms
+  if (millis() - lastCheck < 50) { // Check every 50ms
     return;
   }
   lastCheck = millis();
   
+  // For variance calculation
+  static uint16_t sgHistory[NUM_MOTORS][5] = {0};
+  static uint8_t historyIndex[NUM_MOTORS] = {0};
+  
+  // For acceleration detection
+  static uint32_t movementStartTime[NUM_MOTORS] = {0};
+  static bool movementStarted[NUM_MOTORS] = {false};
+  
   for (int i = 0; i < NUM_MOTORS; i++) {
+    // Check if motion just started
+    if (isMoving[i] && !movementStarted[i]) {
+      movementStarted[i] = true;
+      movementStartTime[i] = millis();
+    }
+    // Check if motion just stopped
+    else if (!isMoving[i] && movementStarted[i]) {
+      movementStarted[i] = false;
+    }
+    
     if (isMoving[i]) {
-      // Read and report the StallGuard value
+      // Read StallGuard value
       stallGuardResult[i] = drivers[i]->SG_RESULT();
+      
+      // Log values (optional)
       Serial.print("Motor ");
       Serial.print(i + 1);
       Serial.print(" SG: ");
       Serial.println(stallGuardResult[i]);
       
-      // In this simple version, we just monitor the values without taking action
-      // We'll add stall detection in the next step
+      // Store in history array
+      sgHistory[i][historyIndex[i]] = stallGuardResult[i];
+      historyIndex[i] = (historyIndex[i] + 1) % 5;
+      
+      // Only check variance after acceleration phase
+      // Assuming acceleration takes ~1000ms (adjust this based on your setup)
+      if (millis() - movementStartTime[i] > 1000) {
+        // Calculate mean
+        uint32_t sum = 0;
+        for (int j = 0; j < 5; j++) {
+          sum += sgHistory[i][j];
+        }
+        float mean = sum / 5.0;
+        
+        // Calculate variance
+        float variance = 0;
+        for (int j = 0; j < 5; j++) {
+          float diff = sgHistory[i][j] - mean;
+          variance += diff * diff;
+        }
+        variance = variance / 5.0;
+        
+        // Log variance
+        Serial.print("Motor ");
+        Serial.print(i + 1);
+        Serial.print("Time elapsed: ");
+        Serial.print(millis() - movementStartTime[i]);
+        Serial.print(" Variance: ");
+        Serial.println(variance);
+        
+        // Stop if variance exceeds threshold (only when not in acceleration phase)
+        if (variance > 1000) { // Threshold to determine experimentally
+          steppers[i].setTargetPositionToStop();
+          Serial.print("Motor ");
+          Serial.print(i + 1);
+          Serial.println(" STALLED - High variance detected - Stopping");
+          isMoving[i] = false;
+        }
+      }
     }
   }
 }
