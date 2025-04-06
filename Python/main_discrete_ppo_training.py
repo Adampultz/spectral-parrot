@@ -77,10 +77,10 @@ CLIP_PARAM = 0.2
 LR_ACTOR = 3e-4  # Increased from 1e-4 for faster learning
 LR_CRITIC = 3e-4  # Increased from 1e-4 for faster learning
 HIDDEN_SIZE = 256
-STEP_WAIT_TIME = 5.0
+STEP_WAIT_TIME = 3.5
 RESET_WAIT_TIME = 0.3
 ENTROPY_COEF = 0.005  # Reduced from default 0.01 to reduce random exploration
-REWARD_SCALE = 0.1  # Scale factor for rewards to bring them to a better range
+REWARD_SCALE = 1.0  # Scale factor for rewards to bring them to a better range
 EARLY_STOPPING_THRESHOLD = 0.02  # Spectral distance threshold for early stopping
 
 # Device configuration
