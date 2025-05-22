@@ -2,14 +2,6 @@
 import logging
 import numpy as np
 import time
-from simplified_discrete_osc_env import DiscreteOSCEnvironment
-
-logger = logging.getLogger(__name__)
-
-# motor_osc_env.py
-import logging
-import numpy as np
-import time
 from simplified_discrete_osc_env import DiscreteOSCEnvironment  # Import the base class
 
 logger = logging.getLogger(__name__)
@@ -25,7 +17,7 @@ class DiscreteOSCAndMotorEnvironment(DiscreteOSCEnvironment):
                  num_oscillators=8, amp_range=(0.0, 1.0), 
                  step_wait_time=1.0, reset_wait_time=0.3,
                  reward_scale=0.1, early_stopping_threshold=0.02,
-                 use_motors=False):
+                 use_motors=False, motor_speed=2, motor_reset_speed=2, motor_steps=100):
         """
         Initialize the environment with support for both OSC and motor control.
         """
@@ -44,6 +36,9 @@ class DiscreteOSCAndMotorEnvironment(DiscreteOSCEnvironment):
         # Additional motor control properties
         self.use_motors = use_motors
         self.motor_controller = motor_controller
+        self.motor_speed = motor_speed
+        self.motor_reset_speed = motor_reset_speed
+        self.motor_steps = motor_steps
         
         # Initialize motor controller if needed
         if self.use_motors and self.motor_controller is None:
@@ -144,19 +139,21 @@ class DiscreteOSCAndMotorEnvironment(DiscreteOSCEnvironment):
                     
                 elif freq_cmd == 0:
                     # Decrease frequency - move counter-clockwise
+                    self.motor_controller.set_speed(motor_num, self.motor_speed)
                     self.motor_controller.set_direction(motor_num, 0)  # 0 = CCW
-                    self.motor_controller.move_steps(motor_num, 1000)
+                    self.motor_controller.move_steps(motor_num, self.motor_steps)
                     # Log which ESP32 is handling this motor
                     esp_num = 2 if motor_num % 2 == 0 else 1
-                    logger.debug(f"Motor {motor_num} (ESP32 #{esp_num}): Decrease frequency (CCW)")
+                    logger.debug(f"Motor {motor_num} (ESP32 #{esp_num}): Decrease frequency (CCW) at speed {self.motor_speed}")
                     
                 elif freq_cmd == 2:
                     # Increase frequency - move clockwise
+                    self.motor_controller.set_speed(motor_num, self.motor_speed)
                     self.motor_controller.set_direction(motor_num, 1)  # 1 = CW
-                    self.motor_controller.move_steps(motor_num, 1000)
+                    self.motor_controller.move_steps(motor_num, self.motor_steps)
                     # Log which ESP32 is handling this motor
                     esp_num = 2 if motor_num % 2 == 0 else 1
-                    logger.debug(f"Motor {motor_num} (ESP32 #{esp_num}): Increase frequency (CW)")
+                    logger.debug(f"Motor {motor_num} (ESP32 #{esp_num}): Increase frequency (CW) at speed {self.motor_speed}")
                 
         except Exception as e:
             logger.error(f"Error sending parameters to motors: {e}")
@@ -176,12 +173,12 @@ class DiscreteOSCAndMotorEnvironment(DiscreteOSCEnvironment):
         
         # Reset motors if using them
         if self.use_motors and self.motor_controller:
-            logger.info("Resetting motors")
+            logger.info(f"Resetting motors with speed {self.motor_reset_speed}")
             # Stop all motors
             self.motor_controller.stop_motor(0)
             # Set base speed for all motors
             for i in range(1, self.num_oscillators + 1):
-                self.motor_controller.set_speed(i, 200)
+                self.motor_controller.set_speed(i, self.motor_reset_speed)  
         
         # Allow more time for reset with physical components
         time.sleep(self.reset_wait_time)
