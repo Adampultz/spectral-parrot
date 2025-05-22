@@ -36,6 +36,7 @@ class OSCHandler:
         
         # Data storage for visualization
         self.data_queue = queue.Queue()
+        # TODO: Make self.numBands and argument to the function
         self.num_bands = 40  # Based on your SC code: ~numMelBands = 40
         
         # Callback storage
