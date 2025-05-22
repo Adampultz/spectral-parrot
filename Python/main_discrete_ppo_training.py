@@ -5,6 +5,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import atexit
 import signal
 
 from pythonosc import udp_client
@@ -13,6 +14,28 @@ from spectral_processor import SpectralProcessor
 from motor_osc_env import DiscreteOSCAndMotorEnvironment  # Import from the new file
 from ppo_agent import HybridPPOAgent
 from Stepper_Control import DualESP32StepperController
+
+env = None  # 1. Create a global variable, initially empty
+
+def emergency_shutdown():
+    """Handle cleanup on program exit"""
+    global env
+    
+    if env is not None and hasattr(env, 'motor_controller') and env.motor_controller:
+        logger.info("Emergency shutdown: stopping and disabling all motors")
+        try:
+            # First stop all motors
+            env.motor_controller.stop_motor(0)
+            time.sleep(0.5)
+            
+            # Then disable all drivers to eliminate holding current and sound
+            env.motor_controller.send_command(0, "DISABLE", 1)
+            time.sleep(0.5)
+            
+            # Finally disconnect
+            env.motor_controller.disconnect()
+        except Exception as e:
+            logger.error(f"Error during emergency shutdown: {e}")
 
 def signal_handler(sig, frame):
     """Handle cleanup on signal (Ctrl+C, system terminate, etc)"""
@@ -62,32 +85,33 @@ USE_MOTORS = True  # Set to False to disable motor control and use only OSC
 ESP32_PORT1 = "/dev/cu.usbserial-0001"  # Port for first ESP32 (odd motors) - adjust as needed
 ESP32_PORT2 = "/dev/cu.usbserial-2"  # Port for second ESP32 (even motors) - adjust as needed
 ESP32_BAUDRATE = 115200
+MOTOR_SPEED = 200
+MOTOR_RESET_SPEED = 200
+MOTOR_MOVE_STEPS = 1000
 
 # Training hyperparameters
-NUM_OSCILLATORS = 8
-NUM_MEL_BANDS = 40
+NUM_OSCILLATORS = 8 # Equals the number of outputs of the neural network
+NUM_MEL_BANDS = 40 # Number of mel bands per spectrum
 TOTAL_TIMESTEPS = 100000
-MAX_EP_LENGTH = 500
+MAX_EP_LENGTH = 512
 UPDATE_INTERVAL = 128  # Reduced from 256 for more frequent updates
-BATCH_SIZE = 64
+BATCH_SIZE = 64 # Batch-size per pass 
 N_EPOCHS = 10  # Slightly reduced to prevent overfitting
-GAMMA = 0.995  # Increased from 0.99 for better long-term reward consideration
-GAE_LAMBDA = 0.95
+GAMMA = 0.995  # Discount factor for future rewards. Increased from 0.99 for better long-term reward consideration
+GAE_LAMBDA = 0.95 # Trade-off between bias and variance
 CLIP_PARAM = 0.2
 LR_ACTOR = 3e-4  # Increased from 1e-4 for faster learning
 LR_CRITIC = 3e-4  # Increased from 1e-4 for faster learning
-HIDDEN_SIZE = 256
-STEP_WAIT_TIME = 3.5
-RESET_WAIT_TIME = 0.3
+HIDDEN_SIZE = 256 # Size of hidden neural network layers
+STEP_WAIT_TIME = 3.5 # How long to wait between each step. TODO: Make dependent on motors stopping
+RESET_WAIT_TIME = 0.3 # How long to wait before first step after reset
 ENTROPY_COEF = 0.005  # Reduced from default 0.01 to reduce random exploration
-REWARD_SCALE = 1.0  # Scale factor for rewards to bring them to a better range
+REWARD_SCALE = 1  # Scale factor for rewards to bring them to a better range
 EARLY_STOPPING_THRESHOLD = 0.02  # Spectral distance threshold for early stopping
 
 # Device configuration
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger.info(f"Using device: {device}")
-
-
 
 def main():
     try:
@@ -145,7 +169,10 @@ def main():
             reset_wait_time=RESET_WAIT_TIME,
             reward_scale=REWARD_SCALE,
             early_stopping_threshold=EARLY_STOPPING_THRESHOLD,
-            use_motors=USE_MOTORS
+            use_motors=USE_MOTORS,
+            motor_speed=MOTOR_SPEED,
+            motor_reset_speed=MOTOR_RESET_SPEED,
+            motor_steps=MOTOR_MOVE_STEPS
         )
         
         # Get dimensions
