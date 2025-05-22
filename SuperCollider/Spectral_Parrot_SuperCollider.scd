@@ -42,6 +42,7 @@ s.options.inDevice_(
 ~ampDiffs = 8.collect{Bus.control(s).set(0.1)};
 ~sineStates = 8.collect{Bus.control(s).set(0.1)};
 ~stringGain = 8.collect{Bus.control(s).set(2.0)};
+~inputSel = Bus.control(s).set(0);
 
 ~mel_win_sizes = [128, 256, 1024, 2048];
 ~numMelBands = 40;
@@ -133,6 +134,8 @@ createOSCHandler = {|name, key, port|
 			if (running == True, {
 				if (msg[1] == false,  {
 					~trainingSynth.free;
+					~stringSynth.free;
+					~analysisSynth.free;
 					~oscSynth.do{|i|
 						i.free}
 				})
@@ -215,11 +218,13 @@ s.waitForBoot({
 		|buf, outChanPy, outChanMonitor, analysisBus|
 		var src;
 		// src = PlayBuf.ar(1, buf, loop: 1);
-		src = 8.collect{
+		src = Select.ar( In.kr(~inputSel),
+			[Mix.ar(SoundIn.ar([8, 9, 10, 11])),
+			PlayBuf.ar(1, buf, loop: 1),
+			Mix(8.collect{
 			var freq = 50.exprand(4950);
 			var amp = 0.1.rrand(1).ampdb.linlin(-65, 1.0, 0.0, 1.0);
-			SinOsc.ar(freq) * AmpComp.kr(freq) * amp * 0.1};
-		src = Mix(src);
+					SinOsc.ar(freq) * AmpComp.kr(freq) * amp * 0.1})]);
 		Out.ar(outChanMonitor, src);
 		Out.ar(analysisBus, src.scope);
 	}).add;
