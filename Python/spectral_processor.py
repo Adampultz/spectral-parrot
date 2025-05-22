@@ -4,7 +4,6 @@ from collections import deque
 import logging
 
 logger = logging.getLogger(__name__)
-
 class SpectralProcessor:
     """
     Processes mel spectrograms from OSC messages for use in reinforcement learning.
