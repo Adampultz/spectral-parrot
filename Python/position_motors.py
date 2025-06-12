@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 import argparse
 import time
 import signal
@@ -7,6 +7,9 @@ from Stepper_Control import DualESP32StepperController
 
 # Global variable to hold controller reference for signal handler
 motor_controller = None
+motor_speed = 200
+motor_steps = 500
+completion_time = 20
 
 def emergency_shutdown(signum=None, frame=None):
     """Emergency shutdown procedure for motors"""
@@ -26,7 +29,7 @@ def emergency_shutdown(signum=None, frame=None):
     if signum is not None:
         sys.exit(0)
 
-def listen_for_completion(controller, duration=10.0):
+def listen_for_completion(controller, duration=completion_time):
     """
     Just listen for any motor completion messages for a specific duration.
     
@@ -64,7 +67,7 @@ def listen_for_completion(controller, duration=10.0):
     else:
         print("❌ No completion messages detected during the listening period")
 
-def test_completion_for_motor(controller, motor_num, steps=50):
+def test_completion_for_motor(controller, motor_num, steps=motor_steps):
     """
     Test completion messages for a specific motor.
     
@@ -75,11 +78,21 @@ def test_completion_for_motor(controller, motor_num, steps=50):
     """
     print(f"\nTesting completion messages for motor {motor_num}...")
     
+    # Determine which ESP32 controls this motor and what internal motor number it is
+    esp_num = 1 if motor_num % 2 == 1 else 2
+    # Calculate internal motor number
+    if esp_num == 1:  # Odd motors: 1->1, 3->2, 5->3, 7->4
+        internal_motor = ((motor_num - 1) // 2) + 1
+    else:  # Even motors: 2->1, 4->2, 6->3, 8->4
+        internal_motor = (motor_num // 2)
+    
+    print(f"Motor {motor_num} is controlled by ESP32 #{esp_num} as internal motor {internal_motor}")
+    
     # Clear existing messages
     controller.get_responses(clear=True)
     
     # Set moderate speed
-    controller.set_speed(motor_num, 2)
+    controller.set_speed(motor_num, motor_speed)  # Or use a faster speed like 50 for quicker testing
     time.sleep(0.1)
     
     # Move the motor
@@ -95,23 +108,36 @@ def test_completion_for_motor(controller, motor_num, steps=50):
     while time.time() - start_time < 10.0:
         responses = controller.get_responses()
         
-        for esp_num in [1, 2]:
-            for response in responses[esp_num]:
-                print(f"ESP32 #{esp_num}: {response}")
+        for resp_esp_num in [1, 2]:
+            for response in responses[resp_esp_num]:
+                print(f"ESP32 #{resp_esp_num}: {response}")
                 
-                if "movement completed" in response.lower():
-                    parts = response.split()
-                    motor_in_msg = None
-                    
+                # Check for MOTOR_COMPLETE format
+                if "MOTOR_COMPLETE:" in response:
                     try:
-                        if len(parts) > 1 and parts[0] == "Motor":
-                            motor_in_msg = int(parts[1])
-                    except:
-                        pass
+                        reported_internal_motor = int(response.split(":")[1].strip())
+                        print(f"  -> Found MOTOR_COMPLETE for internal motor {reported_internal_motor}")
                         
-                    if motor_in_msg == motor_num:
-                        print(f"✅ Detected completion message for motor {motor_num}!")
-                        completion_detected = True
+                        # Check if this matches our expected internal motor
+                        if resp_esp_num == esp_num and reported_internal_motor == internal_motor:
+                            print(f"✅ Detected completion message for motor {motor_num}!")
+                            completion_detected = True
+                    except Exception as e:
+                        print(f"Error parsing: {e}")
+                
+                # Also check verbose format
+                elif "movement completed" in response.lower():
+                    parts = response.split()
+                    if len(parts) > 1 and parts[0].lower() == "motor":
+                        try:
+                            reported_internal_motor = int(parts[1])
+                            print(f"  -> Found movement completed for internal motor {reported_internal_motor}")
+                            
+                            if resp_esp_num == esp_num and reported_internal_motor == internal_motor:
+                                print(f"✅ Detected completion message for motor {motor_num}!")
+                                completion_detected = True
+                        except:
+                            pass
         
         if completion_detected:
             break
@@ -120,6 +146,7 @@ def test_completion_for_motor(controller, motor_num, steps=50):
     
     if not completion_detected:
         print(f"❌ No completion message detected for motor {motor_num} after 10 seconds")
+        print(f"   Expected: Internal motor {internal_motor} from ESP32 #{esp_num}")
     
     # Stop the motor just to be safe
     controller.stop_motor(motor_num)
@@ -144,11 +171,39 @@ def interactive_motor_positioning(port1, port2, baudrate=115200):
     if not motor_controller.connect():
         print("Failed to connect to one or both ESP32s.")
         return
+
+    # Reset ESP32s to see initialization messages
+    print("Connected, resetting ESP32s to see initialization...")
+
+    # Reset both ESP32s by toggling DTR
+    if motor_controller.ser1:
+        motor_controller.ser1.dtr = False
+        time.sleep(0.1)
+        motor_controller.ser1.dtr = True
+        
+    if motor_controller.ser2:
+        motor_controller.ser2.dtr = False
+        time.sleep(0.1)
+        motor_controller.ser2.dtr = True
+
+    # Wait for initialization messages
+    print("Waiting for initialization...")
+    time.sleep(3)
+
+    # Get and display initialization messages
+    responses = motor_controller.get_responses()
+    print("\n=== ESP32 #1 Initialization ===")
+    for resp in responses[1]:
+        print(resp)
+    print("\n=== ESP32 #2 Initialization ===")
+    for resp in responses[2]:
+        print(resp)
+    print("\n=== End of Initialization ===\n")
     
     # Set initial speeds for all motors
     print("Setting initial speeds...")
     for motor in range(1, 9):
-        motor_controller.set_speed(motor, 2)
+        motor_controller.set_speed(motor, motor_speed)
         time.sleep(0.1)
     
     print("\nCommands:")
@@ -178,7 +233,7 @@ def interactive_motor_positioning(port1, port2, baudrate=115200):
                 
             if cmd.startswith("listen"):
                 parts = cmd.split()
-                duration = 10.0  # default
+                duration = completion_time  # default
                 if len(parts) > 1:
                     try:
                         duration = float(parts[1])
