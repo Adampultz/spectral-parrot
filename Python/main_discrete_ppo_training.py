@@ -89,6 +89,7 @@ MOTOR_SPEED = 200
 MOTOR_RESET_SPEED = 200
 MOTOR_MOVE_STEPS = 1000
 
+
 # Training hyperparameters
 NUM_OSCILLATORS = 8 # Equals the number of outputs of the neural network
 NUM_MEL_BANDS = 40 # Number of mel bands per spectrum
