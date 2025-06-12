@@ -132,12 +132,14 @@ createOSCHandler = {|name, key, port|
 				})
 			});
 			if (running == True, {
+				"SuperCollider shutting down".postln;
 				if (msg[1] == false,  {
 					~trainingSynth.free;
 					~stringSynth.free;
 					~analysisSynth.free;
 					~oscSynth.do{|i|
-						i.free}
+						i.free};
+					s.sync;
 				})
 			})
 		},
