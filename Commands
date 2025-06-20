@@ -1,0 +1,15 @@
+TERMINAL COMMANDS:
+--------------------
+
+List usb serial Devices: $ ls /dev/cu.usbserial*
+
+List serial processes: $ lsof | grep usbserial
+
+Kill process: $ kill [process id]
+
+If that doesn't work:
+Kill process: $ kill -9 [process id]
+
+Run the main patch: $ python main_discrete_ppo_training.py --port1 /dev/cu.usbserial-0001 --port2 /dev/cu.usbserial-2
+
+
