@@ -4,7 +4,7 @@ import argparse
 import threading
 
 class DualESP32StepperController:
-    def __init__(self, port1, port2, baudrate=115200, debug=False):
+    def __init__(self, port1, port2, baudrate=115200, debug=False, motor_speed=2, motor_steps=100):
         """
         Initialize controller for two ESP32s
         
@@ -18,6 +18,8 @@ class DualESP32StepperController:
         self.port2 = port2  # Even motors (2, 4, 6, 8)
         self.baudrate = baudrate
         self.debug = debug
+        self.motor_speed = motor_speed
+        self.motor_steps = motor_steps
         
         self.ser1 = None
         self.ser2 = None
@@ -332,6 +334,7 @@ def interactive_mode(controller):
                     continue
                 
                 if cmd_type == "stop":
+                    # Stop the specified motor
                     controller.stop_motor(motor_num)
                 else:
                     if len(parts) < 3:
@@ -364,7 +367,7 @@ def run_test_sequence(controller):
     # Set speeds for all motors
     print("Setting speeds...")
     for i in range(1, 9):
-        controller.set_speed(i, 30 + (i * 5))
+        controller.set_speed(i, controller.motor_speed + (i * 5))
         time.sleep(0.1)
     
     # Set directions (odd CW, even CCW)
@@ -377,7 +380,7 @@ def run_test_sequence(controller):
     # Move all motors with staggered start
     print("Moving motors in sequence...")
     for i in range(1, 9):
-        controller.move_steps(i, 1000)
+        controller.move_steps(i, controller.motor_steps)
         print(f"Started motor {i}")
         time.sleep(0.5)
     
@@ -408,7 +411,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Create the controller
-    controller = DualESP32StepperController(args.port1, args.port2, args.baudrate, args.debug)
+    controller = DualESP32StepperController(args.port1, args.port2, args.baudrate, args.debug, args.motor_speed, args.motor_steps)
     
     try:
         # Connect to both ESP32s
