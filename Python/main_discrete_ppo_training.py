@@ -83,7 +83,7 @@ os.makedirs("./training_results", exist_ok=True)
 # Motor control configuration
 USE_MOTORS = True  # Set to False to disable motor control and use only OSC
 ESP32_PORT1 = "/dev/cu.usbserial-0001"  # Port for first ESP32 (odd motors) - adjust as needed
-ESP32_PORT2 = "/dev/cu.usbserial-2"  # Port for second ESP32 (even motors) - adjust as needed
+ESP32_PORT2 = "/dev/cu.usbserial-1"  # Port for second ESP32 (even motors) - adjust as needed
 ESP32_BAUDRATE = 115200
 MOTOR_SPEED = 200
 MOTOR_RESET_SPEED = 200
