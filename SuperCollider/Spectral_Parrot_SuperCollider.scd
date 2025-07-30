@@ -8,8 +8,8 @@ var createOSCHandler;
 
 s.options.memSize_(2.pow(20));
 s.options.sampleRate_(sampleRate);
-s.options.numInputBusChannels_(numChannels);
-s.options.numOutputBusChannels_(numChannels);
+s.options.numInputBusChannels_(30);
+s.options.numOutputBusChannels_(30);
 s.options.recChannels_(8);
 // s.options.hardwareBufferSize = 64;
 s.options.maxSynthDefs = 2048;
@@ -17,14 +17,25 @@ s.options.maxNodes = 2048;
 s.recHeaderFormat = "wav";
 
 s.options.outDevice_(
+	"Blackhole16_FirefaceUFXIII"
 	// "BlackHole_16_Mac_Audio"
-	"Fireface UFX III (24230602)"
+	// "Fireface UFX III (24230602)"
 );
 
 s.options.inDevice_(
+	"Blackhole16_FirefaceUFXIII"
 	// "BlackHole_16_Mac_Audio"
-	"Fireface UFX III (24230602)"
+	// "Fireface UFX III (24230602)"
 );
+
+~inChannel = 24;
+~outInAudio = 0;
+~outTargetAudio = 1;
+~stringInChan = 16;
+~parrotOutChan = 18;
+~trainingOutChan = 16;
+~outBlackholeTraining = 0;
+~outBlackholeStrings = 1;
 
 ~minFreq = 50;
 ~maxfreq = 8000;
@@ -42,13 +53,27 @@ s.options.inDevice_(
 ~ampDiffs = 8.collect{Bus.control(s).set(0.1)};
 ~sineStates = 8.collect{Bus.control(s).set(0.1)};
 ~stringGain = 8.collect{Bus.control(s).set(2.0)};
-~inputSel = Bus.control(s).set(0);
+~trainingAudioSel = 2; // 0 = Audio input, 1 = Sample, 2 = Summed sines
 
 ~mel_win_sizes = [128, 256, 1024, 2048];
 ~numMelBands = 40;
 ~visualize = true;
 
 ~pythonOSCAddress = NetAddr("127.0.0.1", 3333);  // Python's receiving port
+
+~initiate = {
+	~trainingSynth = Synth(\trainingAudio, [\buf, ~trainingAudio, \analysisBus, ~targetAudioBus, \trainingAudioSel, ~trainingAudioSel,  \inChanOffset, ~inChannel, \outChanMonitor, ~trainingOutChan, \outBlackhole, ~outBlackholeTraining], target: ~audioGrp);
+	/*~oscSynth = 8.collect{|i| Synth(\oscillators, [\freqBus, ~oscFreqBusses[i], \ampBus, ~oscAmpBusses[i], \analysisBus, ~inputAudioBus,  \outChanMonitor, 19], target: ~audioGrp)};*/
+
+	~stringSynth = Synth(\strings, [\analysisBus, ~inputAudioBus, \inChanOffset, ~stringInChan, \stringGain, ~stringGain, \outChan, ~parrotOutChan, \outBlackhole, ~outBlackholeStrings], target: ~audioGrp);
+	~analysisSynth = Synth(\analysis, [\inputAudioBus, ~inputAudioBus, \targetAudioBus, ~targetAudioBus], target: ~analysisGrp);
+	~updateTask = Task({
+		loop {
+			~updateDirection.value;
+			0.05.wait; // Update every 50ms
+		}
+	}).play;
+};
 
 OSCdef(\set_osc_params, {
 	arg msg;
@@ -87,9 +112,6 @@ OSCdef(\set_osc_params, {
 	amps.do { |amp, i|
 		if(i < numOsc) {
 			~oscAmpBusses[i].set(amp);
-			/*     if(0.5.coin) { // Only log occasionally to reduce clutter
-			("Oscillator " ++ i ++ " amplitude set to " ++ amp).postln;
-			};*/
 		};
 	};
 }, "/set_osc_params");
@@ -116,17 +138,7 @@ createOSCHandler = {|name, key, port|
 			msg.postln;
 			if (msg[1] == true, {
 				if (running == False, {
-					~trainingSynth = Synth(\trainingAudio, [\buf, ~trainingAudio, \analysisBus, ~targetAudioBus, \outChanMonitor, 18], target: ~audioGrp);
-					/*~oscSynth = 8.collect{|i| Synth(\oscillators, [\freqBus, ~oscFreqBusses[i], \ampBus, ~oscAmpBusses[i], \analysisBus, ~inputAudioBus,  \outChanMonitor, 19], target: ~audioGrp)};*/
-
-					~stringSynth = Synth(\strings, [\analysisBus, ~inputAudioBus, \stringGain, ~stringGain], target: ~audioGrp);
-				~analysisSynth = Synth(\analysis, [\inputAudioBus, ~inputAudioBus, \targetAudioBus, ~targetAudioBus], target: ~analysisGrp);
-					~updateTask = Task({
-						loop {
-							~updateDirection.value;
-							0.05.wait; // Update every 50ms
-						}
-					}).play;
+					~initiate.fork;
 					s.sync;
 					running = True;
 				})
@@ -201,14 +213,6 @@ s.waitForBoot({
 
 			~freqStates[i] = sendVal.sign.asInteger;
 
-
-			/*        // If ampDiff and phasorDir have opposite signs, we need to reverse
-			var shouldReverse = (ampDiff.sign * phasorDir) < 0;
-
-			// Calculate effective direction
-			var effectiveDir = ampDiff.sign;
-			if(shouldReverse) { effectiveDir = effectiveDir.neg };*/
-
 			// Set the new direction for this string
 			~directions[i].set(sendVal);
 		};
@@ -217,16 +221,17 @@ s.waitForBoot({
 	s.sync;
 
 	SynthDef(\trainingAudio, {
-		|buf, outChanPy, outChanMonitor, analysisBus|
+		|buf, outChanPy, outChanMonitor, analysisBus, inChanOffset, trainingAudioSel = 0, outBlackhole|
 		var src;
 		// src = PlayBuf.ar(1, buf, loop: 1);
-		src = Select.ar( In.kr(~inputSel),
-			[Mix.ar(SoundIn.ar([8, 9, 10, 11])),
-			PlayBuf.ar(1, buf, loop: 1),
-			Mix(8.collect{
-			var freq = 50.exprand(4950);
-			var amp = 0.1.rrand(1).ampdb.linlin(-65, 1.0, 0.0, 1.0);
+		src = Select.ar(trainingAudioSel,
+			[Mix.ar(SoundIn.ar([inChanOffset, inChanOffset + 1, inChanOffset + 2, inChanOffset + 3])),
+				PlayBuf.ar(1, buf, loop: 1),
+				Mix(8.collect{
+					var freq = 50.exprand(4950);
+					var amp = 0.1.rrand(1).ampdb.linlin(-65, 1.0, 0.0, 1.0);
 					SinOsc.ar(freq) * AmpComp.kr(freq) * amp * 0.1})]);
+		Out.ar(outBlackhole, src);
 		Out.ar(outChanMonitor, src);
 		Out.ar(analysisBus, src.scope);
 	}).add;
@@ -241,15 +246,14 @@ s.waitForBoot({
 	}).add;*/
 
 	SynthDef(\strings, {
-		|freqBus, outChanPy, outChanMonitor, analysisBus, stringGain|
+		|freqBus, inChanOffset, outChanPy, outChanMonitor, analysisBus, stringGain, outChan, outBlackhole|
 		var oscArray, amp, ampDiffNeighbours, directions, phasor, sineAM, phasorTest, sineState, sumSigs;
 
 		// Input from 8 self-oscillating strings
-		oscArray = SoundIn.ar([0, 1, 2, 3, 4, 5, 6, 7]);
-		oscArray = oscArray * In.kr(stringGain).poll;
+		oscArray = SoundIn.ar(8.collect{|i| inChanOffset + i});
+		oscArray = oscArray * In.kr(stringGain);
 
 		// Get amplitude of each string, normalized
-		// amp = Amplitude.ar(oscArray).ampdb.linlin(-70.0, -15.0, 0, 1.0);
 		amp = RMS.ar(oscArray, 20).ampdb.linlin(-70.0, -15.0, 0, 1.0);
 		amp = Integrator.ar(amp, 0.2);
 
@@ -265,12 +269,6 @@ s.waitForBoot({
 		// Read direction values from control buses
 		directions = 8.collect{|i| In.kr(~directions[i])};
 
-		// Create phasors with rates based on amplitude differences and direction
-		/*    phasor = 8.collect{|i|
-		var rate = directions[i]  * SampleDur.ir;
-		Phasor.ar(0, rate, 0, pi);
-		};
-		*/
 		// Test if phasors are less than π/2 (for direction control)
 		phasorTest = phasor.collect{|ph| ph < 0.5pi};
 
@@ -287,8 +285,9 @@ s.waitForBoot({
 		sumSigs = Mix(oscArray * sineAM);
 
 		// Output mixed signal
-		Out.ar(2, sumSigs);
-		Out.ar(analysisBus, sumSigs.scope);
+		Out.ar(outChan, sumSigs);
+		Out.ar(outBlackhole, sumSigs);
+		Out.ar(analysisBus, sumSigs);
 	}).add;
 
 	SynthDef(\analysis, {
@@ -301,26 +300,33 @@ s.waitForBoot({
 		SendReply.ar(Impulse.ar((SampleRate.ir / 2048)),"/melBands", [~numMelBands * 2] ++ melBandsTarget.mean ++ melBandsInput.mean);
 	}).add;
 
+	/*		SynthDef(\analysis, {
+	|inputAudioBus, targetAudioBus|
+	var inputAudio, targetAudio, mssl;
+	inputAudio = In.ar(inputAudioBus);
+	targetAudio = In.ar(targetAudioBus);
+	mssl = 4.collect{|i|
+	var fftSize, hopSize, inFFT, targetFFT, magDiff, frobDiff, logAbsDist, inFrobNorm;
+	fftSize = ~mel_win_sizes[i];
+	hopSize = ~mel_win_sizes[i]/4;
+	inFFT = FFT(LocalBuf(fftSize), inputAudio, hopSize, 1);
+	targetFFT = FFT(LocalBuf(fftSize), inputAudio, hopSize, 1);
+	magDiff = PV_MagSubtract(inFFT, targetFFT);
+
+	frobDiff = magDiff.pvcalc(fftSize, {|mags|
+	mags.squared.sum.sqrt});
+	logAbsDist = magDiff.pvcalc(fftSize, {|mags|
+	mags.abs.sum.log});
+	inFrobNorm = inFFT.pvcalc(fftSize, {|mags, phases|
+	mags.squared.sum.sqrt});
+	(frobDiff / inFrobNorm) + logAbsDist;
+	};
+
+	mssl.poll;
+	/*SendReply.ar(Impulse.ar((SampleRate.ir / 2048)),"/melBands", [~numMelBands * 2] ++ melBandsTarget.mean ++ melBandsInput.mean);*/
+	}).add;*/
+
 });
 );
 
-(
-x = Synth(\strings, [\analysisBus, ~inputAudioBus, \stringGain, ~stringGain], target: ~audioGrp);
-~analysisSynth = Synth(\analysis, [\inputAudioBus, ~inputAudioBus, \targetAudioBus, ~targetAudioBus], target: ~analysisGrp);
-~updateTask = Task({
-	loop {
-		~updateDirection.value;
-		0.05.wait; // Update every 50ms
-	}
-}).play;
-)
-s.plotTree
 
-x.free
-{In.kr(~stringGain).scope}.play
-~analysisSynth.free
-
-
-~stringGain[0].getSynchronous
-
-~stringSynth.free
