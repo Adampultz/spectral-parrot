@@ -770,14 +770,14 @@ class EnhancedAudio(SimpleAudio):
                     print("Both channels are SILENT")
                 elif max_diff < 1e-10:
                     print("Channels are bit-perfect identical")
-                else:
-                    print(f"Channel diff - Max: {max_diff:.10f}, Mean: {mean_diff:.10f}")
+                # else:
+                #     print(f"Channel diff - Max: {max_diff:.10f}, Mean: {mean_diff:.10f}")
                     
-                    # Additional debug for large differences
-                    if max_diff > 0.1:
-                        print(f"  ⚠️  Large difference detected!")
-                        print(f"  Ch1 range: [{np.min(channel_1_data):.3f}, {np.max(channel_1_data):.3f}]")
-                        print(f"  Ch2 range: [{np.min(channel_2_data):.3f}, {np.max(channel_2_data):.3f}]")
+                #     # Additional debug for large differences
+                #     if max_diff > 0.1:
+                #         print(f"  ⚠️  Large difference detected!")
+                #         print(f"  Ch1 range: [{np.min(channel_1_data):.3f}, {np.max(channel_1_data):.3f}]")
+                #         print(f"  Ch2 range: [{np.min(channel_2_data):.3f}, {np.max(channel_2_data):.3f}]")
             else:
                 print(f"Channel length mismatch: {len(channel_1_data)} vs {len(channel_2_data)}")
         
