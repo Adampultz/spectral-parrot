@@ -159,10 +159,6 @@ def main():
         osc_handler = OSCHandler()
         setup_signal_handlers(osc_handler)
         
-        # Start OSC server
-        logger.info("Starting OSC server")
-        osc_handler.start()
-        
         # Create enhanced audio system with channel constraint applied during construction
         logger.info("Creating Enhanced Audio System with Multi-Scale Spectral Loss")
         
@@ -234,6 +230,21 @@ def main():
         
         # Wait for audio system to initialize
         time.sleep(2.0)
+        if args.debug:
+            def simple_debug_callback(loss_data):
+                if loss_data and 'total_loss' in loss_data:
+                    print(f"\n[DEBUG] Total Loss: {loss_data['total_loss']:.6f}")
+                    if 'by_scale' in loss_data:
+                        for scale, loss in loss_data['by_scale'].items():
+                            print(f"  {scale}: {loss:.6f}")
+                        print()  # Empty line for readability
+            
+            enhanced_audio.add_spectral_loss_callback(simple_debug_callback)
+            logger.info("Debug callbacks enabled for spectral loss")
+
+        # Start OSC server
+        logger.info("Starting OSC server")
+        osc_handler.start()
         
         # Create motor controller if using motors
         motor_controller = None
@@ -549,6 +560,8 @@ if __name__ == "__main__":
     parser.add_argument('--sample-rate', type=int, default=44100, help='Audio sample rate')
     parser.add_argument('--channels', type=int, default=2, help='Audio channels (must be 2 for spectral loss)')
     parser.add_argument('--reward-scale', type=float, default=10, help='Reward scale factor')
+
+    parser.add_argument('--debug', action='store_true', help='Enable debug output for spectral loss breakdown')
     
     args = parser.parse_args()
     
