@@ -37,7 +37,7 @@
 
               // Add basic StallGuard variables - only these are new
               uint16_t stallGuardResult[NUM_MOTORS] = {0};
-              int sgThreshold = 100;  // Default StallGuard threshold (0-255)
+              int sgThreshold = 150;  // Default StallGuard threshold (0-255)
 
               // Create stepper and driver objects - all using the same SERIAL_PORT but different addresses
               TMC2209Stepper* drivers[NUM_MOTORS];
@@ -228,41 +228,52 @@
                       sum += sgHistory[i][j];
                   }
                   float mean = sum / varianceSize;
+
+                  Serial.print("Motor ");
+                          Serial.print(i + 1);
+                          Serial.print(" SG Value ");
+                          Serial.println(mean);
                   
                   // CRITICAL CHANGE: Don't stop motor, just warn and count
                   if (mean < sgThreshold) {
                       warningCount[i]++;
                       
                       // Only log occasionally to avoid spam
-                      if (warningCount[i] >= 50) {
-                          Serial.print("Motor ");
-                          Serial.print(i + 1);
-                          Serial.print(" EMERGENCY STOP after ");
-                          Serial.print(warningCount[i]);
-                          Serial.println(" StallGuard warnings");
+                      // if (warningCount[i] >= 50) {
+                      //     Serial.print("Motor ");
+                      //     Serial.print(i + 1);
+                      //     Serial.print(" EMERGENCY STOP after ");
+                      //     Serial.print(warningCount[i]);
+                      //     Serial.println(" StallGuard warnings");
                           
-                          // CRITICAL: Send completion message BEFORE stopping
-                          if (!movementCompleteSent[i]) {
-                              movementCompleteSent[i] = true;
-                              Serial.print("MOTOR_COMPLETE:");
-                              Serial.println(i + 1);
-                          }
+                      //     // CRITICAL: Send completion message BEFORE stopping
+                      //     if (!movementCompleteSent[i]) {
+                      //         movementCompleteSent[i] = true;
+                      //         Serial.print("MOTOR_COMPLETE:");
+                      //         Serial.println(i + 1);
+                      //     }
                           
-                          // Now stop the motor
-                          stopMotor(i);
-                          warningCount[i] = 0;
-                      }
+                      //     // Now stop the motor
+                      //     stopMotor(i);
+                      //     warningCount[i] = 0;
+                      // }
                       
                       // OPTION 1: Never auto-stop (safest for training)
                       // Let the motor complete normally and handle via Python
                       
                       // OPTION 2: Only stop after many consecutive warnings (safer)
-                      if (warningCount[i] >= 50) { // 50 * 50ms = 2.5 seconds of warnings
+                      if (warningCount[i] >= 25) { // 50 * 50ms = 2.5 seconds of warnings
                           Serial.print("Motor ");
                           Serial.print(i + 1);
                           Serial.print(" EMERGENCY STOP after ");
                           Serial.print(warningCount[i]);
                           Serial.println(" StallGuard warnings");
+
+                          if (!movementCompleteSent[i]) {
+                              movementCompleteSent[i] = true;
+                              Serial.print("MOTOR_COMPLETE:");
+                              Serial.println(i + 1);
+                          }
                           
                           stopMotor(i);
                           warningCount[i] = 0;
@@ -349,6 +360,7 @@
 
               // Function to stop a specific motor
               void stopMotor(int motorIndex) {
+
                   // CRITICAL: Call setTargetPositionToStop() BEFORE setting isMoving to false
                   if (!steppers[motorIndex].motionComplete()) {
                     // if (isMoving[motorIndex]){
@@ -507,11 +519,7 @@
                       if (motorIndex == NUM_MOTORS) {
                           // Stop all motors
                           for (int i = 0; i < NUM_MOTORS; i++) {
-                              // Make sure we properly stop each motor
-                              // steppers[i].setTargetPositionToStop();
-                              // steppers[i].processMovement();
-                              // isMoving[i] = false;
-                              // movementCompleteSent[i] = false;
+
                               stopMotor(i);
                           }
                           Serial.println("All motors stopped");
