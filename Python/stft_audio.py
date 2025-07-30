@@ -48,7 +48,7 @@ class STFTProcessor:
     def __init__(self, 
                  window_size: int = 2048, 
                  hop_length: int = 512, 
-                 sample_rate: int = 44100,
+                 sample_rate: int = 48000,
                  window_type: str = 'hann',
                  use_pyfftw: bool = True,
                  fft_threads: int = 2):
@@ -562,7 +562,7 @@ class MultiScaleSpectralLoss:
     def _compute_single_scale_loss(self, ch1_data, ch2_data):
         """
         Compute spectral loss at a single scale.
-        Uses float64 for numerical precision in loss computation.
+        Fixed to handle silent and identical signals correctly.
         """
         # Get amplitude spectra (these are float32 from STFT)
         stft_x_f32 = ch1_data['amplitude']  
@@ -580,25 +580,40 @@ class MultiScaleSpectralLoss:
         # Compute difference
         diff = stft_x - stft_y
         
-        # Component 1: Normalized Frobenius norm ‖STFT_n(x) - STFT_n(y)‖_F / ‖STFT_n(x)‖_F
-        frobenius_norm_diff = np.linalg.norm(diff)  # L2 norm for vectors
+        # Component 1: Normalized Frobenius norm
+        frobenius_norm_diff = np.linalg.norm(diff)
         frobenius_norm_x = np.linalg.norm(stft_x)
+        frobenius_norm_y = np.linalg.norm(stft_y)
         
-        # Avoid division by zero and ensure positive result
-        if frobenius_norm_x > 1e-8:
-            normalized_frobenius = frobenius_norm_diff / frobenius_norm_x
+        # FIX: Handle silent/identical signals properly
+        if frobenius_norm_x < 1e-8 and frobenius_norm_y < 1e-8:
+            # Both signals are silent - no difference
+            normalized_frobenius = 0.0
+        elif frobenius_norm_x < 1e-8:
+            # Reference is silent but target has signal - use target norm
+            if frobenius_norm_y > 1e-8:
+                normalized_frobenius = frobenius_norm_diff / frobenius_norm_y
+            else:
+                normalized_frobenius = 0.0
         else:
-            normalized_frobenius = 1.0  # Maximum difference if reference is silent
+            # Normal case - reference has signal
+            normalized_frobenius = frobenius_norm_diff / frobenius_norm_x
         
-        # Component 2: Log L1 norm log(‖STFT_n(x) - STFT_n(y)‖_1)
+        # Component 2: Log L1 norm
         l1_norm_diff = np.sum(np.abs(diff))
         
-        # Ensure we don't take log of very small numbers
-        # Add 1 to ensure log is always positive (log(1) = 0 is minimum)
-        log_l1 = np.log(l1_norm_diff + 1.0)
+        # FIX: Only add log component if there's actual difference
+        if l1_norm_diff > 1e-10:
+            log_l1 = np.log(l1_norm_diff + 1.0)
+        else:
+            log_l1 = 0.0  # No difference = no log component
         
-        # Total loss for this scale (sum of both components)
+        # Total loss for this scale
         scale_loss = normalized_frobenius + log_l1
+        
+        # Additional safety: if signals are identical, loss should be 0
+        if frobenius_norm_diff < 1e-10:
+            scale_loss = 0.0
             
         return scale_loss
         
@@ -688,35 +703,99 @@ class EnhancedAudio(SimpleAudio):
         
     def _stft_callback(self, audio_data: np.ndarray):
         """Internal callback to process audio through STFT and spectral loss."""
-        # Separate channels first
-        if self.channels == 1:
-            # Mono audio
-            channel_1_data = audio_data.astype(np.float32)
-            channel_2_data = audio_data.astype(np.float32)  # Duplicate for processing
+        
+        # Debug: Check input data type and range
+        if not hasattr(self, '_format_logged'):
+            self._format_logged = True
+            print(f"\nAudio format debug:")
+            print(f"  dtype: {audio_data.dtype}")
+            print(f"  shape: {audio_data.shape}")
+            print(f"  min: {np.min(audio_data)}")
+            print(f"  max: {np.max(audio_data)}")
+            print(f"  mean: {np.mean(audio_data)}")
+            
+            # Check if data looks like integers
+            if audio_data.dtype in [np.int16, np.int32, np.int64]:
+                print("  ⚠️  Audio is in INTEGER format!")
+            elif np.max(np.abs(audio_data)) > 10:
+                print("  ⚠️  Audio values exceed normal float range (-1 to +1)!")
+        
+        # Convert to float32 and normalize if needed
+        if audio_data.dtype in [np.int16, np.int32, np.int64]:
+            # Integer audio - need to normalize
+            if audio_data.dtype == np.int16:
+                audio_data = audio_data.astype(np.float32) / 32768.0
+            elif audio_data.dtype == np.int32:
+                audio_data = audio_data.astype(np.float32) / 2147483648.0
+            else:
+                # Assume 24-bit or similar
+                max_val = np.max(np.abs(audio_data))
+                if max_val > 0:
+                    audio_data = audio_data.astype(np.float32) / max_val
         else:
-            # Stereo audio
+            # Already float, but check range
+            audio_data = audio_data.astype(np.float32)
+            
+            # If values are way out of normal audio range, there might be a format issue
+            max_val = np.max(np.abs(audio_data))
+            if max_val > 10.0:
+                print(f"⚠️  WARNING: Audio values up to {max_val:.1f} - possible format mismatch!")
+        
+        # Separate channels
+        if self.channels == 1:
+            channel_1_data = audio_data
+            channel_2_data = audio_data  # Duplicate for processing
+        else:
             if len(audio_data.shape) == 1:
                 # Interleaved stereo data
-                channel_1_data = audio_data[0::2].astype(np.float32)
-                channel_2_data = audio_data[1::2].astype(np.float32)
+                channel_1_data = audio_data[0::2]
+                channel_2_data = audio_data[1::2]
             else:
                 # Already separated channels
-                channel_1_data = audio_data[:, 0].astype(np.float32) if audio_data.shape[1] > 0 else audio_data.flatten().astype(np.float32)
-                channel_2_data = audio_data[:, 1].astype(np.float32) if audio_data.shape[1] > 1 else channel_1_data
+                channel_1_data = audio_data[:, 0] if audio_data.shape[1] > 0 else audio_data.flatten()
+                channel_2_data = audio_data[:, 1] if audio_data.shape[1] > 1 else channel_1_data
+        
+        def debug_channel_data(channel_1_data, channel_2_data):
+            """Check if channel data is actually identical"""
+            if len(channel_1_data) == len(channel_2_data):
+                diff = np.abs(channel_1_data - channel_2_data)
+                max_diff = np.max(diff)
+                mean_diff = np.mean(diff)
+                
+                # Check if both channels are silent
+                ch1_silent = np.max(np.abs(channel_1_data)) < 1e-6
+                ch2_silent = np.max(np.abs(channel_2_data)) < 1e-6
+                
+                if ch1_silent and ch2_silent:
+                    print("Both channels are SILENT")
+                elif max_diff < 1e-10:
+                    print("Channels are bit-perfect identical")
+                else:
+                    print(f"Channel diff - Max: {max_diff:.10f}, Mean: {mean_diff:.10f}")
+                    
+                    # Additional debug for large differences
+                    if max_diff > 0.1:
+                        print(f"  ⚠️  Large difference detected!")
+                        print(f"  Ch1 range: [{np.min(channel_1_data):.3f}, {np.max(channel_1_data):.3f}]")
+                        print(f"  Ch2 range: [{np.min(channel_2_data):.3f}, {np.max(channel_2_data):.3f}]")
+            else:
+                print(f"Channel length mismatch: {len(channel_1_data)} vs {len(channel_2_data)}")
+        
+        # Call the debug function
+        debug_channel_data(channel_1_data, channel_2_data)
         
         # Store latest channel data
         self.latest_channel_data['channel_1'] = channel_1_data
         self.latest_channel_data['channel_2'] = channel_2_data
         
-        # Process through single STFT processor for compatibility
+        # Process through STFT and spectral loss
         self.stft_processor.process_channel_data('channel_1', channel_1_data)
         if self.channels >= 2:
             self.stft_processor.process_channel_data('channel_2', channel_2_data)
         
-        # Process through spectral loss calculator if enabled
         if self.spectral_loss and self.channels >= 2:
             self.spectral_loss.process_audio_channels(channel_1_data, channel_2_data)
-        
+            
     def _store_latest_stft(self, channel, freqs, magnitudes, phases, stft_complex):
         """Store the latest STFT results (for API compatibility)."""
         self.latest_stft[channel] = {
