@@ -766,10 +766,10 @@ class EnhancedAudio(SimpleAudio):
                 ch1_silent = np.max(np.abs(channel_1_data)) < 1e-6
                 ch2_silent = np.max(np.abs(channel_2_data)) < 1e-6
                 
-                if ch1_silent and ch2_silent:
-                    print("Both channels are SILENT")
-                elif max_diff < 1e-10:
-                    print("Channels are bit-perfect identical")
+                # if ch1_silent and ch2_silent:
+                #     print("Both channels are SILENT")
+                # elif max_diff < 1e-10:
+                #     print("Channels are bit-perfect identical")
                 # else:
                 #     print(f"Channel diff - Max: {max_diff:.10f}, Mean: {mean_diff:.10f}")
                     
