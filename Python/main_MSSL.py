@@ -127,7 +127,7 @@ class SimpleAudio:
         """Process audio data through all callbacks"""
 
         if len(audio_data.shape) == 1:
-            audio_data = audio_data.reshape(-1, self.input_channels)
+            audio_data = audio_data.reshape(-1, self.channels)
     
         for callback in self._callbacks:
             callback(audio_data)
