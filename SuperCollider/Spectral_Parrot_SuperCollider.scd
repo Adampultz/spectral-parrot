@@ -11,7 +11,7 @@ s.options.sampleRate_(sampleRate);
 s.options.numInputBusChannels_(30);
 s.options.numOutputBusChannels_(30);
 s.options.recChannels_(8);
-// s.options.hardwareBufferSize = 64;
+s.options.hardwareBufferSize = 256;
 s.options.maxSynthDefs = 2048;
 s.options.maxNodes = 2048;
 s.recHeaderFormat = "wav";
@@ -38,8 +38,7 @@ s.options.inDevice_(
 ~outBlackholeStrings = 1;
 
 ~minFreq = 50;
-~maxfreq = 8000;
-~freqStepSize = 0.05;
+~maxfreq = 2000;
 ~oscFreqs = 8.collect{exprand(~minFreq, ~maxfreq)}.sort;
 ~freqStates = 8.collect{1};
 
@@ -53,11 +52,13 @@ s.options.inDevice_(
 ~ampDiffs = 8.collect{Bus.control(s).set(0.1)};
 ~sineStates = 8.collect{Bus.control(s).set(0.1)};
 ~stringGain = 8.collect{Bus.control(s).set(2.0)};
-~trainingAudioSel = 2; // 0 = Audio input, 1 = Sample, 2 = Summed sines
+~trainingAudioSel = 2; // 0 = Audio input, 1 = Sample, 2 = harmonic sine spectrums, 3 = Summed sines (random frequencies),
+~integration_factor = 0.3;
+/*
+~trainingAudioAddress = "/Users/adammac2023/Documents/Musik-business/Adam/2024/STIP-4/Audio/Training sets/Drones_summed.wav";*/
 
-~mel_win_sizes = [128, 256, 1024, 2048];
-~numMelBands = 40;
-~visualize = true;
+
+~trainingAudioAddress = "/Users/adammac2023/Documents/Musik-business/Adam/2024/STIP-4/Audio/Training sets/DB_3rd_string.wav";
 
 ~pythonOSCAddress = NetAddr("127.0.0.1", 3333);  // Python's receiving port
 
@@ -66,7 +67,6 @@ s.options.inDevice_(
 	/*~oscSynth = 8.collect{|i| Synth(\oscillators, [\freqBus, ~oscFreqBusses[i], \ampBus, ~oscAmpBusses[i], \analysisBus, ~inputAudioBus,  \outChanMonitor, 19], target: ~audioGrp)};*/
 
 	~stringSynth = Synth(\strings, [\analysisBus, ~inputAudioBus, \inChanOffset, ~stringInChan, \stringGain, ~stringGain, \outChan, ~parrotOutChan, \outBlackhole, ~outBlackholeStrings], target: ~audioGrp);
-	~analysisSynth = Synth(\analysis, [\inputAudioBus, ~inputAudioBus, \targetAudioBus, ~targetAudioBus], target: ~analysisGrp);
 	~updateTask = Task({
 		loop {
 			~updateDirection.value;
@@ -136,22 +136,26 @@ createOSCHandler = {|name, key, port|
 		{ |msg, time, addr, recvPort|
 			// "OSCdef received:".postln;
 			msg.postln;
+			running.postln;
 			if (msg[1] == true, {
 				if (running == False, {
-					~initiate.fork;
-					s.sync;
-					running = True;
+					{
+						~initiate.fork;
+						s.sync;
+						running = True;
+					}.fork;
 				})
 			});
 			if (running == True, {
 				"SuperCollider shutting down".postln;
 				if (msg[1] == false,  {
-					~trainingSynth.free;
-					~stringSynth.free;
-					~analysisSynth.free;
-					~oscSynth.do{|i|
-						i.free};
-					s.sync;
+					{
+			~trainingSynth.free;
+						~stringSynth.free;
+						~oscSynth.do{|i|
+							i.free};
+						s.sync;
+					}.fork;
 				})
 			})
 		},
@@ -161,26 +165,11 @@ createOSCHandler = {|name, key, port|
 	).permanent_(true);
 };
 
-~win = Window("Mel Bands Monitor", Rect(10, 10, 620, 320)).front;
-~ms = MultiSliderView(~win,
-	Rect(0,0,~win.bounds.width,~win.bounds.height)
-).elasticMode_(1).isFilled_(1);
-
-OSCdef(\melBands,{
-	arg msg;
-	var melBands, numBands = msg[3];
-	melBands = msg[4..(4+(numBands-1)).asInteger].linlin(-100.0, -10.0, 0.0, 1.0);
-	~pythonOSCAddress.sendMsg("/test",  *melBands);
-	if (~visualize, {
-		defer{~ms.value_(melBands)};
-	});
-},"/melBands");
-
 createOSCHandler.(\loss_osc, '/osc_from_python', 2222);
 
 s.waitForBoot({
 
-	~trainingAudio = Buffer.read(s, "/Users/adammac2023/Documents/Musik-business/Adam/2024/STIP-4/Audio/Training sets/Drones_summed.wav").normalize;
+	~trainingAudio = Buffer.read(s, ~trainingAudioAddress).normalize;
 
 	~stringGain.do{|i| i.set(1.5)};
 
@@ -226,36 +215,29 @@ s.waitForBoot({
 		// src = PlayBuf.ar(1, buf, loop: 1);
 		src = Select.ar(trainingAudioSel,
 			[Mix.ar(SoundIn.ar([inChanOffset, inChanOffset + 1, inChanOffset + 2, inChanOffset + 3])),
-				PlayBuf.ar(1, buf, loop: 1),
+
+				PlayBuf.ar(1, buf, loop: 1) * 0.5,
+				Mix(SinOsc.ar([30, 60, 90, 120, 150, 180, 210, 240], 0, [1.0, 0.5, 0.3, 0.2, 0.1, 0.05, 0.025, 0.0125])) * 0.05;
 				Mix(8.collect{
-					var freq = 50.exprand(4950);
+					var freq = ~minFreq.exprand(~maxfreq);
 					var amp = 0.1.rrand(1).ampdb.linlin(-65, 1.0, 0.0, 1.0);
-					SinOsc.ar(freq) * AmpComp.kr(freq) * amp * 0.1})]);
+					SinOsc.ar(freq) * AmpComp.kr(freq) * amp * 0.05})]);
 		Out.ar(outBlackhole, src);
 		Out.ar(outChanMonitor, src);
-		Out.ar(analysisBus, src.scope);
+/*		Out.ar(analysisBus, src.scope);*/
 	}).add;
-
-	/*	SynthDef(\strings, {
-	|freqBus, ampBus, outChanPy, outChanMonitor, analysisBus|
-	var oscArray;
-	// Use a control bus for frequency to allow real-time updates
-	oscArray = SinOsc.ar(In.kr(freqBus)) * AmpComp.kr(In.kr(freqBus)) * In.kr(ampBus) * 0.1;
-	Out.ar(outChanMonitor, oscArray);
-	Out.ar(analysisBus, oscArray;
-	}).add;*/
 
 	SynthDef(\strings, {
 		|freqBus, inChanOffset, outChanPy, outChanMonitor, analysisBus, stringGain, outChan, outBlackhole|
 		var oscArray, amp, ampDiffNeighbours, directions, phasor, sineAM, phasorTest, sineState, sumSigs;
 
 		// Input from 8 self-oscillating strings
-		oscArray = SoundIn.ar(8.collect{|i| inChanOffset + i});
+		oscArray = SoundIn.ar(8.collect{|i| inChanOffset + i}).scope;
 		oscArray = oscArray * In.kr(stringGain);
 
 		// Get amplitude of each string, normalized
 		amp = RMS.ar(oscArray, 20).ampdb.linlin(-70.0, -15.0, 0, 1.0);
-		amp = Integrator.ar(amp, 0.2);
+		amp = Integrator.ar(amp, ~integration_factor).clip(0.0, 1.0);
 
 		// Calculate the amplitude difference between a string and its neighbors
 		ampDiffNeighbours = 8.collect{|i|
@@ -269,8 +251,9 @@ s.waitForBoot({
 		// Read direction values from control buses
 		directions = 8.collect{|i| In.kr(~directions[i])};
 
+
 		// Test if phasors are less than π/2 (for direction control)
-		phasorTest = phasor.collect{|ph| ph < 0.5pi};
+		// phasorTest = phasor.collect{|ph| ph < 0.5pi};
 
 
 		// Create sine oscillators from phasors (0-1 range)
@@ -282,51 +265,17 @@ s.waitForBoot({
 		8.do{|i| Out.kr(~ampDiffs[i], ampDiffNeighbours[i])};
 		8.do{|i| Out.kr(~sineStates[i], sineState[i])};
 
-		sumSigs = Mix(oscArray * sineAM);
+		sumSigs = Mix(LeakDC.ar(oscArray * sineAM)) * 4.0;
+
+		sumSigs.scope;
 
 		// Output mixed signal
 		Out.ar(outChan, sumSigs);
 		Out.ar(outBlackhole, sumSigs);
-		Out.ar(analysisBus, sumSigs);
+		// Out.ar(analysisBus, sumSigs);
 	}).add;
-
-	SynthDef(\analysis, {
-		|inputAudioBus, targetAudioBus|
-		var inputAudio, targetAudio, melBandsInput, melBandsTarget;
-		inputAudio = In.ar(inputAudioBus);
-		targetAudio = In.ar(targetAudioBus);
-		melBandsInput = 4.collect{|i| FluidMelBands.kr(inputAudio, numBands: ~numMelBands, maxFreq: 10000,  scale: 1, windowSize: ~mel_win_sizes[i])};
-		melBandsTarget = 4.collect{|i| FluidMelBands.kr(targetAudio, numBands: ~numMelBands, maxFreq: 10000,  scale: 1, windowSize: ~mel_win_sizes[i])};
-		SendReply.ar(Impulse.ar((SampleRate.ir / 2048)),"/melBands", [~numMelBands * 2] ++ melBandsTarget.mean ++ melBandsInput.mean);
-	}).add;
-
-	/*		SynthDef(\analysis, {
-	|inputAudioBus, targetAudioBus|
-	var inputAudio, targetAudio, mssl;
-	inputAudio = In.ar(inputAudioBus);
-	targetAudio = In.ar(targetAudioBus);
-	mssl = 4.collect{|i|
-	var fftSize, hopSize, inFFT, targetFFT, magDiff, frobDiff, logAbsDist, inFrobNorm;
-	fftSize = ~mel_win_sizes[i];
-	hopSize = ~mel_win_sizes[i]/4;
-	inFFT = FFT(LocalBuf(fftSize), inputAudio, hopSize, 1);
-	targetFFT = FFT(LocalBuf(fftSize), inputAudio, hopSize, 1);
-	magDiff = PV_MagSubtract(inFFT, targetFFT);
-
-	frobDiff = magDiff.pvcalc(fftSize, {|mags|
-	mags.squared.sum.sqrt});
-	logAbsDist = magDiff.pvcalc(fftSize, {|mags|
-	mags.abs.sum.log});
-	inFrobNorm = inFFT.pvcalc(fftSize, {|mags, phases|
-	mags.squared.sum.sqrt});
-	(frobDiff / inFrobNorm) + logAbsDist;
-	};
-
-	mssl.poll;
-	/*SendReply.ar(Impulse.ar((SampleRate.ir / 2048)),"/melBands", [~numMelBands * 2] ++ melBandsTarget.mean ++ melBandsInput.mean);*/
-	}).add;*/
 
 });
 );
 
-
+s.plotTree
