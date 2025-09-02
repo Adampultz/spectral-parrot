@@ -34,6 +34,7 @@
               const int varianceSize = 10;
               const int variance_threshold = 1000;
               const int accelerationTime = 2000;
+              const int sG_numWarnings = 10;
 
               // Add basic StallGuard variables - only these are new
               uint16_t stallGuardResult[NUM_MOTORS] = {0};
@@ -262,7 +263,7 @@
                       // Let the motor complete normally and handle via Python
                       
                       // OPTION 2: Only stop after many consecutive warnings (safer)
-                      if (warningCount[i] >= 25) { // 50 * 50ms = 2.5 seconds of warnings
+                      if (warningCount[i] >= sG_numWarnings) {
                           Serial.print("Motor ");
                           Serial.print(i + 1);
                           Serial.print(" EMERGENCY STOP after ");
