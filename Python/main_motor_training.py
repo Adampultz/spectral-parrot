@@ -69,7 +69,7 @@ signal.signal(signal.SIGTERM, signal_handler)
 class TrainingConfig:
     # Environment
     num_motors: int = 8
-    early_stopping_threshold: float = 0.5  # More realistic than 0.01
+    early_stopping_threshold: float = 20
     max_steps_without_improvement: int = 100
     
     # Motor control
@@ -199,7 +199,8 @@ def train(config: TrainingConfig):
         use_motors=config.use_motors,
         motor_speed=config.motor_speed,
         motor_reset_speed=config.motor_reset_speed,
-        motor_steps=config.motor_steps
+        motor_steps=config.motor_steps,
+        reward_scale=config.reward_scale
     )
     
     # 5. Create PPO agent
