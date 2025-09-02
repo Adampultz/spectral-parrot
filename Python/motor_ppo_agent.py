@@ -93,8 +93,8 @@ class MotorPPOAgent:
         self.memory = MotorPPOMemory(batch_size)
         
         # Exploration temperature schedule
-        self.initial_temperature = 1.0
-        self.temperature_decay = 0.995
+        self.initial_temperature = 2.0  # Up from 1.0
+        self.temperature_decay = 0.98   # Faster decay from 0.995
         self.min_temperature = 0.1
         self.current_temperature = self.initial_temperature
         
