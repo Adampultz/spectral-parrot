@@ -561,7 +561,8 @@ class MultiScaleSpectralLoss:
                 
     def _compute_single_scale_loss(self, ch1_data, ch2_data):
         """
-        Compute spectral loss at a single scale.
+        Compute spectral loss at a single scale using shape-based comparison.
+        This ignores overall volume differences and focuses on spectral shape.
         Fixed to handle silent and identical signals correctly.
         """
         # Get amplitude spectra (these are float32 from STFT)
