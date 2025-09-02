@@ -24,7 +24,7 @@ class MotorEnvironment(gym.Env):
                  num_motors=8,
                  step_wait_time=3.5,
                  reset_wait_time=0.3,
-                 reward_config=None,
+                 reward_scale=1.0,
                  early_stopping_threshold=0.02,
                  max_steps_without_improvement=100,
                  use_motors=True,
@@ -40,7 +40,6 @@ class MotorEnvironment(gym.Env):
             num_motors: Number of motors to control
             step_wait_time: Time to wait after motor movement
             reset_wait_time: Time to wait after reset
-            reward_config: RewardConfig object (from previous artifacts)
             early_stopping_threshold: Loss threshold for episode termination
             max_steps_without_improvement: Steps before truncation
             use_motors: Whether to actually control motors
@@ -66,7 +65,7 @@ class MotorEnvironment(gym.Env):
         self.motor_steps = motor_steps
         
         # Reward configuration
-        self.reward_config = reward_config
+        self.reward_scale = reward_scale
         self.early_stopping_threshold = early_stopping_threshold
         self.max_steps_without_improvement = max_steps_without_improvement
         
@@ -90,7 +89,7 @@ class MotorEnvironment(gym.Env):
         
         # Motor position tracking (for visualization/debugging)
         self.motor_positions = np.zeros(num_motors)  # Cumulative steps
-        self.motor_movement_history = []
+        self.motor_movement_history = deque(maxlen=1000)
         
         # History tracking for sophisticated reward calculation
         self.improvement_history = deque(maxlen=5)
@@ -496,8 +495,7 @@ class MotorEnvironment(gym.Env):
         Returns:
             reward: Calculated reward
         """
-        # Use configured reward scale, default to 10.0 for backward compatibility
-        reward_scale = self.reward_config.reward_scale if self.reward_config else 10.0
+        reward_scale = self.reward_scale
         
         # 1. Exponential reward shaping (more sensitive to small improvements)
         # This gives stronger signal when loss is already low
@@ -542,8 +540,8 @@ class MotorEnvironment(gym.Env):
         reward = (base_reward + improvement_bonus + consistency_bonus + 
                  proximity_bonus + stagnation_penalty) * reward_scale
         
-        # Clip to reasonable range
-        reward = np.clip(reward, -10.0 * reward_scale, 10.0 * reward_scale)
+        # # Clip to reasonable range
+        # reward = np.clip(reward, -10.0 * reward_scale, 10.0 * reward_scale)
         
         # Log detailed breakdown occasionally
         if np.random.random() < 0.02:  # 2% of the time
