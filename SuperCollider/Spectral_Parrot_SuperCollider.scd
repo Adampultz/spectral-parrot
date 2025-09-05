@@ -2,7 +2,7 @@
 
 (
 var numChannels = 20; // Number of channels
-var sampleRate = 44100; // Assume default sample rate (change if needed)
+var sampleRate = 48000; // Assume default sample rate (change if needed)
 var createOSCHandler;
 
 
@@ -11,7 +11,7 @@ s.options.sampleRate_(sampleRate);
 s.options.numInputBusChannels_(30);
 s.options.numOutputBusChannels_(30);
 s.options.recChannels_(8);
-s.options.hardwareBufferSize = 256;
+// s.options.hardwareBufferSize = 512;
 s.options.maxSynthDefs = 2048;
 s.options.maxNodes = 2048;
 s.recHeaderFormat = "wav";
@@ -37,7 +37,7 @@ s.options.inDevice_(
 ~outBlackholeTraining = 0;
 ~outBlackholeStrings = 1;
 
-~minFreq = 50;
+~minFreq = 40;
 ~maxfreq = 2000;
 ~oscFreqs = 8.collect{exprand(~minFreq, ~maxfreq)}.sort;
 ~freqStates = 8.collect{1};
@@ -51,9 +51,9 @@ s.options.inDevice_(
 ~directions = 8.collect{Bus.control(s).set(1)};
 ~ampDiffs = 8.collect{Bus.control(s).set(0.1)};
 ~sineStates = 8.collect{Bus.control(s).set(0.1)};
-~stringGain = 8.collect{Bus.control(s).set(2.0)};
-~trainingAudioSel = 2; // 0 = Audio input, 1 = Sample, 2 = harmonic sine spectrums, 3 = Summed sines (random frequencies),
-~integration_factor = 0.3;
+~stringGain = 8.collect{Bus.control(s).set(1.0)};
+~trainingAudioSel = 3; // 0 = Audio input, 1 = Sample, 2 = harmonic sine spectrums, 3 = Summed sines (random frequencies),
+~integration_factor = 0.2;
 /*
 ~trainingAudioAddress = "/Users/adammac2023/Documents/Musik-business/Adam/2024/STIP-4/Audio/Training sets/Drones_summed.wav";*/
 
@@ -224,7 +224,7 @@ s.waitForBoot({
 					SinOsc.ar(freq) * AmpComp.kr(freq) * amp * 0.05})]);
 		Out.ar(outBlackhole, src);
 		Out.ar(outChanMonitor, src);
-/*		Out.ar(analysisBus, src.scope);*/
+/*		Out.ar(analysisBus, src);*/
 	}).add;
 
 	SynthDef(\strings, {
@@ -232,12 +232,12 @@ s.waitForBoot({
 		var oscArray, amp, ampDiffNeighbours, directions, phasor, sineAM, phasorTest, sineState, sumSigs;
 
 		// Input from 8 self-oscillating strings
-		oscArray = SoundIn.ar(8.collect{|i| inChanOffset + i}).scope;
+		oscArray = SoundIn.ar(8.collect{|i| inChanOffset + i});
 		oscArray = oscArray * In.kr(stringGain);
 
-		// Get amplitude of each string, normalized
+		// Get amplitude of each string
 		amp = RMS.ar(oscArray, 20).ampdb.linlin(-70.0, -15.0, 0, 1.0);
-		amp = Integrator.ar(amp, ~integration_factor).clip(0.0, 1.0);
+		amp = Integrator.ar(amp, ~integration_factor).clip(0.0, 1.0).scope;
 
 		// Calculate the amplitude difference between a string and its neighbors
 		ampDiffNeighbours = 8.collect{|i|
@@ -271,7 +271,7 @@ s.waitForBoot({
 
 		// Output mixed signal
 		Out.ar(outChan, sumSigs);
-		Out.ar(outBlackhole, sumSigs);
+		Out.ar(outBlackhole, Mix(oscArray));
 		// Out.ar(analysisBus, sumSigs);
 	}).add;
 
