@@ -18,9 +18,17 @@
 
               #define R_SENSE 0.11f // Match to your driver
 
+              // Motor phase tracking
+              enum MotorPhase {
+                PHASE_IDLE,
+                PHASE_ACCELERATING,
+                PHASE_CONSTANT_SPEED,
+                PHASE_DECELERATING
+              };
+
               // Motor status and settings
-              bool shaft[NUM_MOTORS] = {false};
-              bool isMoving[NUM_MOTORS] = {false};
+              bool shaft[NUM_MOTORS] = {false, false, false, false};
+              bool isMoving[NUM_MOTORS] = {false, false, false, false};
               int motorSpeed[NUM_MOTORS] = {2, 2, 2, 2};
               int motorDirection[NUM_MOTORS] = {1, 1, 1, 1};
               int stepsToMove[NUM_MOTORS] = {600, 600, 600, 600};
@@ -29,15 +37,26 @@
               uint16_t mAmps[NUM_MOTORS] = {1200, 1200, 1200, 1200}; // Set to 1.2A (1200mA) based on our previous discussion
               long currentPosition[NUM_MOTORS] = {0, 0, 0, 0};
               long targetPosition[NUM_MOTORS] = {0, 0, 0, 0};
-              bool movementCompleteSent[NUM_MOTORS] = {false};
+              bool movementCompleteSent[NUM_MOTORS] = {false, false, false, false};
+              MotorPhase motorPhase[NUM_MOTORS] = {PHASE_IDLE, PHASE_IDLE, PHASE_IDLE, PHASE_IDLE};
+              float maxVelocityReached[NUM_MOTORS] = {0, 0, 0, 0};
+              long lastPosition[NUM_MOTORS] = {0, 0, 0, 0};
+              float lastVelocity[NUM_MOTORS] = {0, 0, 0, 0};
+              uint32_t phaseStartTime[NUM_MOTORS] = {0, 0, 0, 0};
+              bool stallGuardEnabled[NUM_MOTORS] = {false, false, false, false};
 
               const int varianceSize = 10;
               const int variance_threshold = 1000;
               const int accelerationTime = 2000;
-              const int sG_numWarnings = 10;
+              const int sG_numWarnings = 5;
+
+              const float VELOCITY_THRESHOLD = 0.95;  // Consider constant speed if velocity > 95% of max
+              const float DECEL_THRESHOLD = 0.90;     // Start decel detection when velocity < 90% of max
+              const int DECEL_POSITION_THRESHOLD = 200; // Steps from target to consider decelerating
+
 
               // Add basic StallGuard variables - only these are new
-              uint16_t stallGuardResult[NUM_MOTORS] = {0};
+              uint16_t stallGuardResult[NUM_MOTORS] = {0, 0, 0, 0};
               int sgThreshold = 150;  // Default StallGuard threshold (0-255)
 
               // Create stepper and driver objects - all using the same SERIAL_PORT but different addresses
@@ -181,122 +200,284 @@
                 }
               }
 
-              void checkStallGuard() {
-      static uint32_t lastCheck = 0;
-      if (millis() - lastCheck < 50) { // Check every 50ms
-          return;
-      }
-      lastCheck = millis();
-      
-      // For variance calculation
-      static uint16_t sgHistory[NUM_MOTORS][varianceSize] = {0};
-      static uint8_t historyIndex[NUM_MOTORS] = {0};
-      
-      // For acceleration detection
-      static uint32_t movementStartTime[NUM_MOTORS] = {0};
-      static bool movementStarted[NUM_MOTORS] = {false};
-      
-      // Add warning flags instead of immediate stopping
-      static bool stallGuardWarning[NUM_MOTORS] = {false};
-      static uint8_t warningCount[NUM_MOTORS] = {0};
-      
-      for (int i = 0; i < NUM_MOTORS; i++) {
-          // Check if motion just started
-          if (isMoving[i] && !movementStarted[i]) {
-              movementStarted[i] = true;
-              movementStartTime[i] = millis();
-              stallGuardWarning[i] = false;  // Reset warning flag
-              warningCount[i] = 0;           // Reset warning counter
-          }
-          // Check if motion just stopped
-          else if (!isMoving[i] && movementStarted[i]) {
-              movementStarted[i] = false;
-          }
-          
-          if (isMoving[i]) {
-              // Read StallGuard value
-              stallGuardResult[i] = drivers[i]->SG_RESULT();
-              
-              // Store in history array
-              sgHistory[i][historyIndex[i]] = stallGuardResult[i];
-              historyIndex[i] = (historyIndex[i] + 1) % varianceSize;
-              
-              // Only check after acceleration phase
-              if (millis() - movementStartTime[i] > accelerationTime) {
-                  // Calculate mean
-                  uint32_t sum = 0;
-                  for (int j = 0; j < varianceSize; j++) {
-                      sum += sgHistory[i][j];
-                  }
-                  float mean = sum / varianceSize;
+void printMotorPhases() {
+    Serial.println("\n========== Motor Phase Status ==========");
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        Serial.print("Motor ");
+        Serial.print(i + 1);
+        Serial.print(": ");
+        
+        // Print phase
+        switch(motorPhase[i]) {
+            case PHASE_IDLE:
+                Serial.print("IDLE          ");
+                break;
+            case PHASE_ACCELERATING:
+                Serial.print("ACCELERATING  ");
+                break;
+            case PHASE_CONSTANT_SPEED:
+                Serial.print("CONSTANT      ");
+                break;
+            case PHASE_DECELERATING:
+                Serial.print("DECELERATING  ");
+                break;
+        }
+        
+        // Print StallGuard status
+        Serial.print(" | StallGuard: ");
+        Serial.print(stallGuardEnabled[i] ? "ON " : "OFF");
+        
+        // Print current SG value if moving
+        if (isMoving[i]) {
+            Serial.print(" | SG Value: ");
+            Serial.print(drivers[i]->SG_RESULT());
+            Serial.print(" | Velocity: ");
+            Serial.print(abs(steppers[i].getCurrentVelocityInStepsPerSecond()), 0);
+            Serial.print(" | Distance: ");
+            // Serial.print(abs(steppers[i].getDistanceToTargetSigned()));
+        }
+        
+        Serial.println();
+    }
+    Serial.println("=========================================");
+}
 
-                  Serial.print("Motor ");
-                          Serial.print(i + 1);
-                          Serial.print(" SG Value ");
-                          Serial.println(mean);
-                  
-                  // CRITICAL CHANGE: Don't stop motor, just warn and count
-                  if (mean < sgThreshold) {
-                      warningCount[i]++;
-                      
-                      // Only log occasionally to avoid spam
-                      // if (warningCount[i] >= 50) {
-                      //     Serial.print("Motor ");
-                      //     Serial.print(i + 1);
-                      //     Serial.print(" EMERGENCY STOP after ");
-                      //     Serial.print(warningCount[i]);
-                      //     Serial.println(" StallGuard warnings");
-                          
-                      //     // CRITICAL: Send completion message BEFORE stopping
-                      //     if (!movementCompleteSent[i]) {
-                      //         movementCompleteSent[i] = true;
-                      //         Serial.print("MOTOR_COMPLETE:");
-                      //         Serial.println(i + 1);
-                      //     }
-                          
-                      //     // Now stop the motor
-                      //     stopMotor(i);
-                      //     warningCount[i] = 0;
-                      // }
-                      
-                      // OPTION 1: Never auto-stop (safest for training)
-                      // Let the motor complete normally and handle via Python
-                      
-                      // OPTION 2: Only stop after many consecutive warnings (safer)
-                      if (warningCount[i] >= sG_numWarnings) {
-                          Serial.print("Motor ");
-                          Serial.print(i + 1);
-                          Serial.print(" EMERGENCY STOP after ");
-                          Serial.print(warningCount[i]);
-                          Serial.println(" StallGuard warnings");
+// Function to manually set StallGuard state (for testing)
+void setStallGuardState(int motorIndex, bool enabled) {
+    if (motorIndex >= 0 && motorIndex < NUM_MOTORS) {
+        stallGuardEnabled[motorIndex] = enabled;
+        Serial.print("Motor ");
+        Serial.print(motorIndex + 1);
+        Serial.print(" StallGuard manually set to: ");
+        Serial.println(enabled ? "ON" : "OFF");
+    }
+}
 
-                          if (!movementCompleteSent[i]) {
-                              movementCompleteSent[i] = true;
-                              Serial.print("MOTOR_COMPLETE:");
-                              Serial.println(i + 1);
-                          }
-                          
-                          stopMotor(i);
-                          warningCount[i] = 0;
-                      }
-                  } else {
-                      // Reset warning count if StallGuard is normal
-                      warningCount[i] = 0;
-                  }
-              }
-          }
-      }
-  }
+void checkStallGuard() {
+    static uint32_t lastCheck = 0;
+    if (millis() - lastCheck < 50) {
+        return;
+    }
+    lastCheck = millis();
+    
+    // Variance calculation arrays
+    static uint16_t sgHistory[NUM_MOTORS][varianceSize] = {0};
+    static uint8_t historyIndex[NUM_MOTORS] = {0};
+    static uint8_t warningCount[NUM_MOTORS] = {0};
+    
+    // FIX: Add a flag to track if history buffer is valid
+    static bool historyValid[NUM_MOTORS] = {false, false, false, false};
+    static uint8_t historySamples[NUM_MOTORS] = {0};
+    
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        if (isMoving[i]) {
+            // Get current motor state
+            long currentPosition = steppers[i].getCurrentPositionInSteps();
+            float currentVelocity = abs(steppers[i].getCurrentVelocityInStepsPerSecond());
+            long distanceToTarget = abs(targetPosition[i] - currentPosition);
+            
+            // ===== PHASE DETECTION LOGIC =====
+            
+            if (motorPhase[i] == PHASE_IDLE) {
+                // Just started moving
+                motorPhase[i] = PHASE_ACCELERATING;
+                phaseStartTime[i] = millis();
+                maxVelocityReached[i] = 0;
+                stallGuardEnabled[i] = false;
+                
+                // FIX: Reset history validity when starting new movement
+                historyValid[i] = false;
+                historySamples[i] = 0;
+                historyIndex[i] = 0;
+                warningCount[i] = 0;  // Also reset warning count
+                
+                // Serial.print("Motor ");
+                // Serial.print(i + 1);
+                // Serial.println(" started - ACCELERATING (StallGuard OFF)");
+            }
+            else if (motorPhase[i] == PHASE_ACCELERATING) {
+                // Track maximum velocity reached
+                if (currentVelocity > maxVelocityReached[i]) {
+                    maxVelocityReached[i] = currentVelocity;
+                }
+                
+                // Check if we've reached constant speed
+                float targetVelocity = motorSpeed[i] * mSteps[i];
+                bool velocityReached = currentVelocity >= (VELOCITY_THRESHOLD * targetVelocity);
+                bool timeElapsed = (millis() - phaseStartTime[i]) > accelerationTime;
+                
+                if (velocityReached || timeElapsed) {
+                    motorPhase[i] = PHASE_CONSTANT_SPEED;
+                    phaseStartTime[i] = millis();
+                    stallGuardEnabled[i] = true;
+                    
+                    // FIX: Pre-fill history buffer with current StallGuard value
+                    uint16_t currentSG = drivers[i]->SG_RESULT();
+                    for (int j = 0; j < varianceSize; j++) {
+                        sgHistory[i][j] = currentSG;
+                    }
+                    historyIndex[i] = 0;
+                    historySamples[i] = varianceSize;  // Mark buffer as full
+                    historyValid[i] = false;  // But wait for a few real samples
+                    
+                    // Serial.print("Motor ");
+                    // Serial.print(i + 1);
+                    // Serial.print(" at CONSTANT SPEED: ");
+                    // Serial.print(currentVelocity);
+                    // Serial.print(" steps/s (StallGuard ON, pre-filled with SG=");
+                    // Serial.print(currentSG);
+                    // Serial.println(")");
+                }
+            }
+            else if (motorPhase[i] == PHASE_CONSTANT_SPEED) {
+                // Check for deceleration start
+                bool velocityDropping = currentVelocity < (DECEL_THRESHOLD * maxVelocityReached[i]);
+                
+                // Calculate deceleration distance
+                long decelDistance = 0;
+                if (accelSpeed[i] > 0) {
+                    decelDistance = (long)((currentVelocity * currentVelocity) / 
+                                         (2.0 * accelSpeed[i] * mSteps[i]));
+                }
+                bool nearTarget = distanceToTarget <= (decelDistance * 1.3);
+                
+                if (velocityDropping || nearTarget) {
+                    motorPhase[i] = PHASE_DECELERATING;
+                    phaseStartTime[i] = millis();
+                    stallGuardEnabled[i] = false;
+                    
+                    // Serial.print("Motor ");
+                    // Serial.print(i + 1);
+                    // Serial.print(" DECELERATING - ");
+                    // Serial.print(distanceToTarget);
+                    // Serial.println(" steps to target (StallGuard OFF)");
+                }
+            }
+            else if (motorPhase[i] == PHASE_DECELERATING) {
+                // Stay in deceleration until stopped
+                // StallGuard remains disabled
+            }
+            
+            // ===== STALLGUARD CHECKING (only if enabled) =====
+            
+            if (stallGuardEnabled[i]) {
+                // Read StallGuard value
+                stallGuardResult[i] = drivers[i]->SG_RESULT();
+                
+                // Store in history for averaging
+                sgHistory[i][historyIndex[i]] = stallGuardResult[i];
+                historyIndex[i] = (historyIndex[i] + 1) % varianceSize;
+                
+                // FIX: Track how many real samples we have after transition
+                if (!historyValid[i]) {
+                    historySamples[i]++;
+                    // Wait for at least half the buffer to fill with real samples
+                    if (historySamples[i] >= varianceSize / 2) {
+                        historyValid[i] = true;
+                        // Serial.print("Motor ");
+                        // Serial.print(i + 1);
+                        // Serial.println(" StallGuard history now valid");
+                    }
+                }
+                
+                // Calculate rolling average
+                uint32_t sum = 0;
+                for (int j = 0; j < varianceSize; j++) {
+                    sum += sgHistory[i][j];
+                }
+                float mean = sum / (float)varianceSize;
+                
+                // Periodic debug output
+                static uint32_t lastDebugOutput[NUM_MOTORS] = {0};
+                // if (millis() - lastDebugOutput[i] > 500) {
+                //     Serial.print("Motor ");
+                //     Serial.print(i + 1);
+                //     Serial.print(" SG: ");
+                //     Serial.print(mean, 0);
+                //     Serial.print(" (CONST-ON");
+                //     if (!historyValid[i]) {
+                //         Serial.print("-FILLING");
+                //     }
+                //     Serial.println(")");
+                //     lastDebugOutput[i] = millis();
+                // }
+                
+                // FIX: Only check for stalls if history buffer is valid
+                if (historyValid[i]) {
+                    if (mean < sgThreshold) {
+                        warningCount[i]++;
+                        
+                        if (warningCount[i] >= sG_numWarnings) {
+                            Serial.print("!!! Motor ");
+                            Serial.print(i + 1);
+                            Serial.print(" STALL DETECTED (SG: ");
+                            Serial.print(mean, 0);
+                            Serial.println(") - Emergency stop");
+                            
+                            if (!movementCompleteSent[i]) {
+                                movementCompleteSent[i] = true;
+                                Serial.print("MOTOR_COMPLETE:");
+                                Serial.println(i + 1);
+                            }
+                            
+                            stopMotor(i);
+                            warningCount[i] = 0;
+                        }
+                    } else {
+                        warningCount[i] = 0;
+                    }
+                } else {
+                    // History not valid yet, don't check for stalls
+                    warningCount[i] = 0;
+                }
+            } else {
+                // StallGuard is disabled
+                static uint32_t lastDisabledMsg[NUM_MOTORS] = {0};
+                if (millis() - lastDisabledMsg[i] > 2000) {
+                    Serial.print("Motor ");
+                    Serial.print(i + 1);
+                    Serial.print(" StallGuard DISABLED (Phase: ");
+                    switch(motorPhase[i]) {
+                        case PHASE_ACCELERATING: Serial.print("ACCELERATING"); break;
+                        case PHASE_DECELERATING: Serial.print("DECELERATING"); break;
+                        default: Serial.print("OTHER");
+                    }
+                    Serial.println(")");
+                    lastDisabledMsg[i] = millis();
+                }
+                
+                warningCount[i] = 0;
+            }
+            
+            // Update last values
+            lastPosition[i] = currentPosition;
+            lastVelocity[i] = currentVelocity;
+            
+        } else {
+            // Motor stopped - reset to idle
+            if (motorPhase[i] != PHASE_IDLE) {
+                motorPhase[i] = PHASE_IDLE;
+                stallGuardEnabled[i] = true;
+                historyValid[i] = false;  // FIX: Reset validity for next movement
+                warningCount[i] = 0;
+                
+                Serial.print("Motor ");
+                Serial.print(i + 1);
+                Serial.println(" stopped - IDLE (StallGuard ready)");
+            }
+        }
+    }
+}
 
               // Function to set speed for a specific motor
               void setMotorSpeed(int motorIndex, int speed) {
                 motorSpeed[motorIndex] = speed;
                 steppers[motorIndex].setSpeedInStepsPerSecond(speed * mSteps[motorIndex]);
                 
-                Serial.print("Motor ");
-                Serial.print(motorIndex + 1);
-                Serial.print(" speed set to: ");
-                Serial.println(speed);
+                // Serial.print("Motor ");
+                // Serial.print(motorIndex + 1);
+                // Serial.print(" speed set to: ");
+                // Serial.println(speed);
               }
 
               // Function to set direction for a specific motor
@@ -320,10 +501,10 @@
                   steppers[motorIndex].setTargetPositionInSteps(targetPosition[motorIndex]);
                 }
                 
-                Serial.print("Motor ");
-                Serial.print(motorIndex + 1);
-                Serial.print(" direction set to: ");
-                Serial.println(direction == 1 ? "Clockwise" : "Counter-clockwise");
+                // Serial.print("Motor ");
+                // Serial.print(motorIndex + 1);
+                // Serial.print(" direction set to: ");
+                // Serial.println(direction == 1 ? "Clockwise" : "Counter-clockwise");
               }
 
               // Function to move a specific motor
@@ -343,16 +524,6 @@
                 
                 // Set the target position relative to current position
                 targetPosition[motorIndex] = currentPosition[motorIndex] + relativeSteps;
-                
-                // Debug the values before setting the target
-                // Serial.print("Motor ");
-                // Serial.print(motorIndex + 1);
-                // Serial.print(" moving steps: ");
-                // Serial.println(steps);
-                // Serial.print("From position: ");
-                // Serial.print(currentPosition[motorIndex]);
-                // Serial.print(" to position: ");
-                // Serial.println(targetPosition[motorIndex]);
                 
                 // Set the target position in the stepper object
                 steppers[motorIndex].setTargetPositionInSteps(targetPosition[motorIndex]);
@@ -383,11 +554,6 @@
                       Serial.print(motorIndex + 1);
                       Serial.println(" emergency stop triggered");
                     }
-                  // } else {
-                  //   Serial.print("Motor ");
-                  //     Serial.print(motorIndex + 1);
-                  //     Serial.println(" has already stopped");
-                  // }
                 }
 
               void loop() {
@@ -396,19 +562,7 @@
                   if (isMoving[i]) {
                     // Process the movement
                     steppers[i].processMovement();
-                    
-                //     // Check if movement is complete
-                //      if (steppers[i].motionComplete()) {
-                //   // Only send completion message if not already sent
-                //   if (!movementCompleteSent[i]) {
-                //     isMoving[i] = false;
-                //     movementCompleteSent[i] = true;
-                    
-                //     // Send completion message in a standard format for reliable parsing
-                //     Serial.print("MOTOR_COMPLETE:");
-                //     Serial.println(i + 1);  // Convert to 1-based index
-                //   }
-                // }
+
                 if (steppers[i].motionComplete()) {
               // Only send completion message if not already sent
               if (!movementCompleteSent[i]) {
@@ -564,16 +718,23 @@
                         Serial.println(" enabled - driver turned on");
                       }
                     }
-        //                   else if (commandType == "TEST") {
-        //     Serial.println("ESP32 is alive and responding!");
-        //     // Test each driver
-        //     for (int i = 0; i < NUM_MOTORS; i++) {
-        //         Serial.print("Driver ");
-        //         Serial.print(i + 1);
-        //         Serial.print(" version: 0x");
-        //         Serial.println(drivers[i]->version(), HEX);
-        //     }
-        // }
+                    else if (commandType == "PHASES") {
+                          // Print current phase status of all motors
+                          printMotorPhases();
+                      }
+                      else if (commandType == "SGSTATE") {
+                          // Manually control StallGuard state (for testing)
+                          // Format: MOTOR:x SGSTATE:1 (1=on, 0=off)
+                          if (motorIndex < NUM_MOTORS) {
+                              setStallGuardState(motorIndex, value == 1);
+                          } else {
+                              // Set for all motors
+                              for (int i = 0; i < NUM_MOTORS; i++) {
+                                  setStallGuardState(i, value == 1);
+                              }
+                          }
+                      }
+
                   }
                 }
               }
