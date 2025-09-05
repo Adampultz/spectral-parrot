@@ -29,6 +29,8 @@ class SimpleLossProcessor:
         self.current_loss = 0.0
         self.loss_history = deque(maxlen=100)
         self.previous_loss = None
+
+        self.current_direction = 0
         
         # Track best performance for reward calculation
         self.best_loss = float('inf')
@@ -56,6 +58,9 @@ class SimpleLossProcessor:
             # Update best loss
             if self.current_loss < self.best_loss:
                 self.best_loss = self.current_loss
+
+            if 'direction' in loss_data:
+                self.current_direction = float(loss_data['direction'])
             
             # Track data reception
             self.data_received_count += 1
@@ -78,14 +83,17 @@ class SimpleLossProcessor:
             logger.warning("Attempting to get observation before loss processor is ready")
             # Return a reasonable default value
             loss_value = 10.0  # High loss indicates poor match
+            direction_value = 0.0  # Neutral when not ready
         else:
             loss_value = self.current_loss
+            direction_value = self.current_direction
         
         # Clamp to reasonable range and ensure positive
         loss_clamped = np.clip(loss_value, 0.0, 100.0)
         
         # Return as tensor with batch dimension [1, 1]
-        observation = torch.tensor([[loss_clamped]], device=self.device, dtype=torch.float32)
+        observation = torch.tensor([[loss_clamped, direction_value]], 
+                                 device=self.device, dtype=torch.float32)
         
         return observation
     
