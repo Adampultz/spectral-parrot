@@ -94,8 +94,8 @@ class MotorPPOAgent:
         
         # Exploration temperature schedule
         self.initial_temperature = 2.0  # Up from 1.0
-        self.temperature_decay = 0.98   # Faster decay from 0.995
-        self.min_temperature = 0.1
+        self.temperature_decay = 0.995 
+        self.min_temperature = 0.3
         self.current_temperature = self.initial_temperature
         
     def select_action(self, state):
