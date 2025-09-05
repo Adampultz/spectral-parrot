@@ -493,10 +493,24 @@ class MultiScaleSpectralLoss:
         with self.lock:
             # Store reference to magnitude buffer (magnitudes are float32)
             # Will convert to float64 in loss computation for precision
+
+            if scale in self.spectral_data[channel]:
+                # Only keep the most recent data
+                pass  # Current implementation already overwrites
+
             self.spectral_data[channel][scale] = {
                 'amplitude': magnitudes.copy(),  # Copy needed since buffer is reused
                 'timestamp': time.time()
             }
+    
+    def cleanup_old_spectral_data(self, max_age=1.0):
+        """Remove spectral data older than max_age seconds."""
+        current_time = time.time()
+        with self.lock:
+            for channel in self.spectral_data:
+                for scale in list(self.spectral_data[channel].keys()):
+                    if current_time - self.spectral_data[channel][scale]['timestamp'] > max_age:
+                        del self.spectral_data[channel][scale]
         
     def _compute_losses_if_ready(self):
         """Compute losses if we have data from both channels for all scales."""
@@ -526,22 +540,27 @@ class MultiScaleSpectralLoss:
         S(x, y) = Σ_{n∈N} [‖STFT_n(x) - STFT_n(y)‖_F / ‖STFT_n(x)‖_F + log(‖STFT_n(x) - STFT_n(y)‖_1)]
         """
         total_loss = 0.0
+        summed_directions = 0
         scale_losses = {}
         
         for scale_name in scales:
             ch1_data = self.spectral_data['channel_1'][scale_name]
             ch2_data = self.spectral_data['channel_2'][scale_name]
             
-            scale_loss = self._compute_single_scale_loss(ch1_data, ch2_data)
+            scale_loss, direction = self._compute_single_scale_loss(ch1_data, ch2_data)
             scale_losses[scale_name] = scale_loss
             
             # Add to total loss (sum over all scales as in RAVE equation 5)
             total_loss += scale_loss
+            summed_directions += direction
+
+        final_direction = np.sign(summed_directions)  
             
         # Store current losses
         self.current_losses = {
             'total_loss': total_loss,
             'by_scale': scale_losses,
+            'direction': final_direction,  # Will be -1, 0, or +1
             'timestamp': time.time()
         }
         
@@ -580,6 +599,10 @@ class MultiScaleSpectralLoss:
         
         # Compute difference
         diff = stft_x - stft_y
+
+        # Get the sign of the difference
+        overall_bias = np.sum(diff)
+        direction = np.sign(overall_bias)
         
         # Component 1: Normalized Frobenius norm
         frobenius_norm_diff = np.linalg.norm(diff)
@@ -616,7 +639,7 @@ class MultiScaleSpectralLoss:
         if frobenius_norm_diff < 1e-10:
             scale_loss = 0.0
             
-        return scale_loss
+        return scale_loss, direction
         
     def get_current_losses(self):
         """Get the most recent loss computation."""
