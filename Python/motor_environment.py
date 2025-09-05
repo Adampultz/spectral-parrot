@@ -6,7 +6,7 @@ import logging
 import time
 import gymnasium as gym
 from gymnasium import spaces
-from typing import Optional, Set, Dict, Tuple
+from typing import Optional, Set, List, Dict, Tuple
 from collections import deque
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,10 @@ class MotorEnvironment(gym.Env):
                  use_motors=True,
                  motor_speed=200,
                  motor_reset_speed=200,
-                 motor_steps=1000):
+                 motor_steps=1000,
+                 max_ccw_steps: List[int] = None,
+                 max_cw_steps: List[int] = None,
+                 limit_penalty=5.0):
         """
         Initialize the motor environment.
         
@@ -73,11 +76,11 @@ class MotorEnvironment(gym.Env):
         # Actions: 3 discrete choices per motor
         self.action_space = spaces.MultiDiscrete([3] * num_motors)
         
-        # Observation: Single loss value from MSSL
+        # Observation: Single loss value from MSSL and direction of loss
         self.observation_space = spaces.Box(
-            low=0.0, 
-            high=100.0,
-            shape=(1,),
+            low=np.array([0.0, -1.0], dtype=np.float32),   # [loss_min, direction_min]
+            high=np.array([100.0, 1.0], dtype=np.float32), # [loss_max, direction_max]
+            shape=(2,),                  
             dtype=np.float32
         )
         
@@ -94,6 +97,12 @@ class MotorEnvironment(gym.Env):
         # History tracking for sophisticated reward calculation
         self.improvement_history = deque(maxlen=5)
         self.loss_history = deque(maxlen=20)
+
+        self.max_ccw_steps = max_ccw_steps
+        self.max_cw_steps = max_cw_steps
+        self.limit_penalty = limit_penalty
+        self.motor_positions = np.zeros(num_motors)  # Track position from center
+        self.limit_violations = np.zeros(num_motors, dtype=int)
         
         logger.info(f"MotorEnvironment initialized with {num_motors} motors")
         logger.info(f"Action space: {self.action_space}")
@@ -106,7 +115,7 @@ class MotorEnvironment(gym.Env):
         self.best_loss = float('inf')
         self.steps_without_improvement = 0
         self.episode_steps = 0
-        self.motor_movement_history = []
+        self.motor_movement_history.clear()
         
         # Clear history for new episode
         self.improvement_history.clear()
@@ -182,9 +191,15 @@ class MotorEnvironment(gym.Env):
             motor_num = i + 1  # Motors are 1-indexed
             
             if action == 0:  # CCW
-                motors_moving.add(motor_num)
-                movement_commands[motor_num] = 'CCW'
-                self.motor_positions[i] -= self.motor_steps
+                if self.motor_positions[i] - self.motor_steps < -self.max_ccw_steps[i]:
+                    # Block or reduce movement
+                    logger.warning(f"Motor {i+1} at CCW limit")
+                    continue
+                else:
+                    # Allow movement and update position
+                    motors_moving.add(motor_num)
+                    movement_commands[motor_num] = 'CCW'
+                    self.motor_positions[i] -= self.motor_steps
             elif action == 2:  # CW
                 motors_moving.add(motor_num)
                 movement_commands[motor_num] = 'CW'
