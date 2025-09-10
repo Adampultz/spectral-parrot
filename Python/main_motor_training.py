@@ -67,11 +67,11 @@ class TrainingConfig:
     use_motors: bool = True
     motor_speed: int = 200
     motor_reset_speed: int = 200
-    motor_steps: int = 500
-    step_wait_time: float = 1.5
+    motor_steps: int = 100
+    step_wait_time: float = 1.0
     reset_wait_time: float = 0.3
-    max_ccw_steps: List[int] = field(default_factory=lambda: [3000, 3000, 3000, 5000, 5000, 5000, 5000, 5000])
-    max_cw_steps: List[int] = field(default_factory=lambda: [5000, 5000, 5000, 5000, 5000, 5000, 5000, 5000])
+    max_ccw_steps: List[int] = field(default_factory=lambda: [3000, 3000, 3000, 4000, 5000, 5000, 5000, 5000])
+    max_cw_steps: List[int] = field(default_factory=lambda: [4000, 4000, 4000, 4000, 4000, 4000, 4000, 4000])
     limit_penalty: float = 0.0
     
     # Serial ports
@@ -90,7 +90,7 @@ class TrainingConfig:
     max_ep_length: int = 512
     update_interval: int = 64
     batch_size: int = 32
-    n_epochs: int = 4
+    n_epochs: int = 10
     
     # Learning rates
     lr_actor: float = 8e-4
@@ -104,6 +104,7 @@ class TrainingConfig:
     
     # Network
     hidden_size: int = 64
+    hold_bias: float = 1.7
     
     # Reward
     reward_scale: float = 1.0
@@ -111,6 +112,7 @@ class TrainingConfig:
     # Saving
     save_interval: int = 1
     plot_frequency: int = 1
+    log_frequency: int = 1
     checkpoint_dir: str = "./checkpoints"
     results_dir: str = "./results"
     
@@ -256,7 +258,8 @@ def load_checkpoint(checkpoint_path: str,
             gae_lambda=config.gae_lambda,
             clip_param=config.clip_param,
             entropy_coef=config.entropy_coef,
-            batch_size=config.batch_size
+            batch_size=config.batch_size,
+            hold_bias=config.hold_bias
         )
     
     # Load agent state
@@ -441,7 +444,8 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             gae_lambda=config.gae_lambda,
             clip_param=config.clip_param,
             entropy_coef=config.entropy_coef,
-            batch_size=config.batch_size
+            batch_size=config.batch_size,
+            hold_bias=config.hold_bias
         )
     
     # 6. Training loop (continuing from checkpoint if loaded)
@@ -470,7 +474,7 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             episode_loss_sum += info['spectral_loss']
             
             # Log step details occasionally
-            if step % 20 == 0:
+            if step % config.log_frequency == 0:
                 logger.info(f"Episode {training_state.episode}, Step {step}: "
                            f"Loss={info['spectral_loss']:.4f}, "
                            f"Reward={reward:.2f}, Motors moved: {info['motors_moved']}")
