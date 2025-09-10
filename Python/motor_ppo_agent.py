@@ -57,7 +57,7 @@ class MotorPPOAgent:
                  hidden_size=64, lr_actor=3e-4, lr_critic=3e-4,
                  gamma=0.99, gae_lambda=0.95, clip_param=0.2,
                  value_coef=0.5, entropy_coef=0.01, max_grad_norm=0.5,
-                 batch_size=64):
+                 batch_size=64, hold_bias=0.5):
         """Initialize the motor PPO agent."""
         self.device = device
         self.gamma = gamma
@@ -72,7 +72,7 @@ class MotorPPOAgent:
         from motor_actor_network import MotorActorNetwork
         
         # Initialize networks
-        self.actor = MotorActorNetwork(state_dim, num_motors, hidden_size).to(device)
+        self.actor = MotorActorNetwork(state_dim, num_motors, hidden_size, hold_bias=hold_bias).to(device)
         
         # Critic can be simpler too
         self.critic = nn.Sequential(
@@ -143,6 +143,11 @@ class MotorPPOAgent:
         """
         # Compute returns and advantages
         returns = self.compute_gae(next_value)
+
+        logger.debug(f"GAE Returns stats: min={min(returns):.2f}, max={max(returns):.2f}, "
+                f"mean={np.mean(returns):.2f}, std={np.std(returns):.2f}")
+        logger.debug(f"Raw rewards: {self.memory.rewards[-5:]}")  # Last 5 rewards
+        logger.debug(f"Values: {self.memory.values[-5:]}")  # Last 5 values
         
         # Convert to tensors
         states = torch.FloatTensor(np.array(self.memory.states)).to(self.device)
