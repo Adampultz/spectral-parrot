@@ -15,7 +15,7 @@ class MotorActorNetwork(nn.Module):
     Each motor has 3 actions: CCW (0), HOLD (1), CW (2)
     """
     def __init__(self, state_dim, num_motors, hidden_size=64, 
-                 use_layernorm=True, dropout_rate=0.1):
+                 use_layernorm=True, dropout_rate=0.1, hold_bias=0.5):
         """
         Initialize the motor actor network.
         
@@ -30,6 +30,7 @@ class MotorActorNetwork(nn.Module):
         
         self.num_motors = num_motors
         self.state_dim = state_dim
+        self.hold_bias = hold_bias
         
         # Simpler architecture for discrete-only control
         self.feature_extractor = nn.Sequential(
@@ -69,7 +70,7 @@ class MotorActorNetwork(nn.Module):
             
             # Bias toward HOLD (action 1)
             nn.init.zeros_(final_layer.bias)
-            final_layer.bias.data[1] = 0.5  # Slight preference for HOLD
+            final_layer.bias.data[1] = self.hold_bias  # Slight preference for HOLD
     
     def forward(self, state):
         """
