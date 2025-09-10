@@ -97,55 +97,56 @@ class SimpleLossProcessor:
         
         return observation
     
-    def calculate_reward(self, reward_scale=1.0, previous_loss=None):
-        """
-        Calculate reward based on spectral loss.
-        Lower loss = higher reward.
+    # Probably redundant, remove if so
+    # def calculate_reward(self, reward_scale=1.0, previous_loss=None):
+    #     """
+    #     Calculate reward based on spectral loss.
+    #     Lower loss = higher reward.
         
-        Args:
-            reward_scale: Scale factor to apply to the reward
-            previous_loss: Previous loss value for improvement calculation
+    #     Args:
+    #         reward_scale: Scale factor to apply to the reward
+    #         previous_loss: Previous loss value for improvement calculation
         
-        Returns:
-            tuple: (reward, current_loss)
-        """
-        # Use stored previous loss if not provided
-        if previous_loss is None:
-            previous_loss = self.previous_loss
+    #     Returns:
+    #         tuple: (reward, current_loss)
+    #     """
+    #     # Use stored previous loss if not provided
+    #     if previous_loss is None:
+    #         previous_loss = self.previous_loss
         
-        # Base reward is negative loss (higher reward for smaller loss)
-        base_reward = -self.current_loss
+    #     # Base reward is negative loss (higher reward for smaller loss)
+    #     base_reward = -self.current_loss
         
-        # Add improvement bonus if we have previous loss
-        improvement_bonus = 0
-        if previous_loss is not None:
-            improvement = previous_loss - self.current_loss
-            if improvement > 0:
-                # Reward improvement proportionally
-                improvement_bonus = improvement * 5.0
+    #     # Add improvement bonus if we have previous loss
+    #     improvement_bonus = 0
+    #     if previous_loss is not None:
+    #         improvement = previous_loss - self.current_loss
+    #         if improvement > 0:
+    #             # Reward improvement proportionally
+    #             improvement_bonus = improvement * 5.0
         
-        # Add bonus for approaching the best performance
-        best_approach_bonus = 0
-        if len(self.loss_history) > 1:
-            recent_avg_loss = np.mean(list(self.loss_history)[-10:])  # Last 10 values
-            if self.current_loss < recent_avg_loss:
-                best_approach_bonus = (recent_avg_loss - self.current_loss) * 2.0
+    #     # Add bonus for approaching the best performance
+    #     best_approach_bonus = 0
+    #     if len(self.loss_history) > 1:
+    #         recent_avg_loss = np.mean(list(self.loss_history)[-10:])  # Last 10 values
+    #         if self.current_loss < recent_avg_loss:
+    #             best_approach_bonus = (recent_avg_loss - self.current_loss) * 2.0
         
-        # Calculate final reward
-        reward = (base_reward + improvement_bonus + best_approach_bonus) * reward_scale
+    #     # Calculate final reward
+    #     reward = (base_reward + improvement_bonus + best_approach_bonus) * reward_scale
         
-        # Update previous loss for next calculation
-        self.previous_loss = self.current_loss
+    #     # Update previous loss for next calculation
+    #     self.previous_loss = self.current_loss
         
-        # Log occasionally
-        if np.random.random() < 0.05:  # Log about 5% of the time
-            logger.debug(f"Loss-based reward: loss={self.current_loss:.4f}, "
-                        f"base={base_reward*reward_scale:.4f}, "
-                        f"improvement={improvement_bonus*reward_scale:.4f}, "
-                        f"approach={best_approach_bonus*reward_scale:.4f}, "
-                        f"total={reward:.4f}")
+    #     # Log occasionally
+    #     if np.random.random() < 0.05:  # Log about 5% of the time
+    #         logger.debug(f"Loss-based reward: loss={self.current_loss:.4f}, "
+    #                     f"base={base_reward*reward_scale:.4f}, "
+    #                     f"improvement={improvement_bonus*reward_scale:.4f}, "
+    #                     f"approach={best_approach_bonus*reward_scale:.4f}, "
+    #                     f"total={reward:.4f}")
         
-        return reward, self.current_loss
+    #     return reward, self.current_loss
     
     def get_performance_stats(self):
         """
