@@ -413,7 +413,7 @@ class MultiScaleSpectralLoss:
     """
     
     def __init__(self, 
-                 sample_rate=44100,
+                 sample_rate=48000,
                  scales=None,
                  window_type='hann'):
         """
