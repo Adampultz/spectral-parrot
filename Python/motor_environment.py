@@ -8,6 +8,7 @@ import gymnasium as gym
 from gymnasium import spaces
 from typing import Optional, Set, List, Dict, Tuple
 from collections import deque
+from position_motors import calibrate_full_sequence, calibrate_full_sequence_with_random, map_internal_to_global_motor
 
 logger = logging.getLogger(__name__)
 
@@ -83,12 +84,15 @@ class MotorEnvironment(gym.Env):
                 use_motors=True,
                 motor_speed=200,
                 motor_reset_speed=200,
-                motor_steps=1000,
+                motor_steps=100,
                 max_ccw_steps: List[int] = None,
                 max_cw_steps: List[int] = None,
                 cw_limit_position: int = 5000,  # Position when at CW limit (StallGuard message from ESP32)
                 auto_recalibrate: bool = True,   # Auto-recalibrate on StallGuard
-                limit_penalty=5.0): # Penalty for reaching CW and CCW limits
+                limit_penalty=5.0,
+                adaptive_hold_bias=1.0,
+                manual_calibration=True,
+                reset_calibration=0): 
         """
         Initialize the motor environment.
         
@@ -121,6 +125,12 @@ class MotorEnvironment(gym.Env):
         self.motor_speed = motor_speed
         self.motor_reset_speed = motor_reset_speed
         self.motor_steps = motor_steps
+
+        self.adaptive_hold_bias = adaptive_hold_bias
+        self.stagnation_threshold = 0.5
+        self.stagnation_window = 20
+        self.manual_calibration = manual_calibration
+        self.reset_calibration = reset_calibration
         
         # Reward configuration
         self.reward_scale = reward_scale
@@ -213,7 +223,10 @@ class MotorEnvironment(gym.Env):
             
             # Optional: Move motors to home position
             # This depends on your physical setup
-            # self._move_motors_to_home()
+            if self.reset_calibration == 0:
+                calibrate_full_sequence(self.motor_controller, self.manual_calibration)
+            elif self.reset_calibration == 1:
+                calibrate_full_sequence_with_random(self.motor_controller, self.manual_calibration)
         
         # Reset loss processor statistics
         self.loss_processor.reset_stats()
@@ -242,6 +255,77 @@ class MotorEnvironment(gym.Env):
         }
         
         return observation, info
+    
+    def is_stagnant(self):
+        """Check if training is stagnant based on recent loss history."""
+        if len(self.loss_history) >= self.stagnation_window:
+            recent_losses = list(self.loss_history)[-self.stagnation_window:]
+            loss_std = np.std(recent_losses)
+            return loss_std < self.stagnation_threshold
+        return False
+    
+    def get_recommended_hold_bias(self):
+        """Recommend hold bias based on current training state."""
+        if self.is_stagnant():
+            return 0.8  # Exploration mode
+        return 1.7  # Normal mode
+    
+    def _move_motors_to_home(self):
+        """Move all motors to their home positions."""
+        if not self.motor_controller:
+            return
+
+        logger.info("Moving motors to home positions...")
+        
+        # Phase 1: Move to CW limits - all motors together
+        logger.info("Phase 1: Moving to CW limits")
+        motors_moving = set()
+        movement_commands = {}
+        
+        # Start all motors (both ESP32s)
+        for motor_num in range(1, self.num_motors + 1):
+            self.motor_controller.set_speed(motor_num, self.motor_reset_speed)
+            self.motor_controller.set_direction(motor_num, 1)  # 1 = CW
+            self.motor_controller.move_steps(motor_num, 30000)
+            motors_moving.add(motor_num)
+            movement_commands[motor_num] = ('CW', 30000)
+            time.sleep(5)
+            logger.debug(f"Started CW homing for motor {motor_num}")
+
+        # Wait for all motors
+        completion_info = self._wait_for_motors_completion(motors_moving, movement_commands, timeout=60.0)
+        time.sleep(1.0)
+
+        # Phase 2: Center from CW limits - all motors together
+        center_offset = 4000
+        logger.info(f"Phase 2: Centering from CW limits ({center_offset} steps CCW)")
+        motors_moving = set()
+        movement_commands = {}
+        
+        # Start all motors centering
+        for motor_num in range(1, self.num_motors + 1):
+            self.motor_controller.set_speed(motor_num, self.motor_reset_speed)
+            self.motor_controller.set_direction(motor_num, 0)  # 0 = CCW
+            self.motor_controller.move_steps(motor_num, center_offset)
+            motors_moving.add(motor_num)
+            movement_commands[motor_num] = ('CCW', center_offset)
+            time.sleep(5)
+            logger.debug(f"Started centering for motor {motor_num}")
+
+        # Wait for all motors to complete centering
+        completion_info = self._wait_for_motors_completion(
+            motors_moving,
+            movement_commands,
+            timeout=100.0,
+            stabilization_time=1.0
+        )
+        
+        # Update all positions
+        for motor_num in range(1, self.num_motors + 1):
+            self.motor_positions[motor_num - 1] = -center_offset
+            logger.info(f"Motor {motor_num} centered at position {-center_offset}")
+
+        logger.info("Motors homed successfully")
     
     def step(self, actions):
         """
@@ -329,7 +413,7 @@ class MotorEnvironment(gym.Env):
         
         # Calculate reward with penalties
         reward = self._calculate_sophisticated_reward(current_loss, len(motors_moving))
-        reward -= total_limit_penalty
+        # reward -= total_limit_penalty
         
         # Check termination
         terminated = current_loss < self.early_stopping_threshold
@@ -351,7 +435,9 @@ class MotorEnvironment(gym.Env):
             'motors_moved': list(motors_moving),
             'motor_positions': self.motor_positions.copy(),
             'limit_violations': self.limit_violations.copy(),
-            'episode_steps': self.episode_steps
+            'episode_steps': self.episode_steps,
+            'is_stagnant': self.is_stagnant(),
+            'recommended_hold_bias': self.get_recommended_hold_bias()
         }
         
         return observation, reward, terminated, truncated, info
@@ -380,34 +466,6 @@ class MotorEnvironment(gym.Env):
             self.motor_controller.set_speed(motor_num, self.motor_speed)
             self.motor_controller.set_direction(motor_num, 0 if direction == 'CCW' else 1)
             self.motor_controller.move_steps(motor_num, self.motor_steps)
-
-    def _map_internal_to_global_motor(self, esp_num, internal_motor_num):
-        """
-        Map internal motor number (1-4) from ESP32 to global motor number (1-8).
-        
-        ESP32 #1 controls ODD motors: 
-            internal 1 -> global 1
-            internal 2 -> global 3
-            internal 3 -> global 5
-            internal 4 -> global 7
-            
-        ESP32 #2 controls EVEN motors:
-            internal 1 -> global 2
-            internal 2 -> global 4
-            internal 3 -> global 6
-            internal 4 -> global 8
-        """
-        if internal_motor_num < 1 or internal_motor_num > 4:
-            logger.error(f"Invalid internal motor number: {internal_motor_num}")
-            return None
-            
-        if esp_num == 1:  # Odd motors
-            return (internal_motor_num * 2) - 1
-        elif esp_num == 2:  # Even motors  
-            return internal_motor_num * 2
-        else:
-            logger.error(f"Invalid ESP32 number: {esp_num}")
-            return None
     
     def _wait_for_motors_completion(self, motors_moving, movement_commands, timeout=30.0, stabilization_time=2.0):
         """
@@ -481,7 +539,7 @@ class MotorEnvironment(gym.Env):
                     elif "MOTOR_COMPLETE:" in response:
                         try:
                             internal_motor = int(response.split(":")[1].strip())
-                            completed_motor = self._map_internal_to_global_motor(esp_num, internal_motor)
+                            completed_motor = map_internal_to_global_motor(esp_num, internal_motor)
                             logger.debug(f"Parsed MOTOR_COMPLETE: internal {internal_motor} -> global {completed_motor}")
                         except Exception as e:
                             logger.error(f"Error parsing MOTOR_COMPLETE: {e}")
@@ -493,7 +551,7 @@ class MotorEnvironment(gym.Env):
                             for i, part in enumerate(parts):
                                 if part.lower() == "motor" and i + 1 < len(parts):
                                     internal_motor = int(parts[i + 1])
-                                    completed_motor = self._map_internal_to_global_motor(esp_num, internal_motor)
+                                    completed_motor = map_internal_to_global_motor(esp_num, internal_motor)
                                     logger.debug(f"Parsed verbose: internal {internal_motor} -> global {completed_motor}")
                                     break
                         except Exception as e:
@@ -625,12 +683,24 @@ class MotorEnvironment(gym.Env):
         
         # 1. Base reward (exponential shaping)
         # base_reward = -np.log(current_loss + 1.0)
-        expected_loss = 24.0  # Based on your logs showing 23-25 typical
-        base_reward = (expected_loss - current_loss) * 2.0
+        target_loss = 15.0  # This is the observed mean loss over several training episodes. This is our baseline from which we want to improve
+        # base_reward = (expected_loss - current_loss) * 2.0
+        base_reward = target_loss - current_loss
         
         # 2. Improvement bonus with momentum consideration
         improvement_bonus = 0
         consistency_bonus = 0
+        breakthrough_bonus = 0
+
+        if self.episode_steps > 30:
+            if current_loss < self.best_loss:
+                breakthrough_bonus = 10.0 * (self.best_loss - current_loss)
+                if not np.isfinite(breakthrough_bonus):
+                    logger.warning(f"Invalid breakthrough_bonus: {breakthrough_bonus}")
+                    breakthrough_bonus = 0.0
+                else:
+                    logger.info(f"BREAKTHROUGH! New best loss: {current_loss:.4f} (bonus: {breakthrough_bonus:.2f})")
+
         if self.previous_loss is not None:
             improvement = self.previous_loss - current_loss
             
@@ -640,8 +710,8 @@ class MotorEnvironment(gym.Env):
             # Average recent improvements
             avg_improvement = np.mean(list(self.improvement_history))
             
-            # Bonus for improvement, penalty for worsening
-            improvement_bonus = improvement * 5.0
+            # Bonus for improvement, penalty for worsening (do we need a multiplier? Previously scaled by * 5)
+            improvement_bonus = improvement
             
             # Extra bonus for consistent improvement
             if avg_improvement > 0 and improvement > 0:
@@ -677,15 +747,23 @@ class MotorEnvironment(gym.Env):
             proximity_bonus = (0.5 - current_loss) * 10.0
         
         # FINAL REWARD CALCULATION - ALL COMPONENTS INCLUDED
+        # reward = (
+        #     base_reward +           # Base reward
+        #     improvement_bonus +     # Reward for improvement
+        #     consistency_bonus +     # Reward for consistent improvement
+        #     movement_penalty +      # Penalty for excessive movement (adaptive)
+        #     stagnation_penalty +    # PENALTY FOR STAGNATION (HERE!)
+        #     efficiency_bonus +      # Bonus for efficient movement
+        #     proximity_bonus         # Bonus for being close to target
+        # ) * reward_scale
+
         reward = (
-            base_reward +           # Base reward
-            improvement_bonus +     # Reward for improvement
-            consistency_bonus +     # Reward for consistent improvement
-            movement_penalty +      # Penalty for excessive movement (adaptive)
-            stagnation_penalty +    # PENALTY FOR STAGNATION (HERE!)
-            efficiency_bonus +      # Bonus for efficient movement
-            proximity_bonus         # Bonus for being close to target
-        ) * reward_scale
+            base_reward +
+            improvement_bonus +
+            breakthrough_bonus
+        )
+
+        reward = np.clip(reward, -50, +100)
         
         # Log detailed breakdown occasionally
         if np.random.random() < 0.02:  # 2% of the time
