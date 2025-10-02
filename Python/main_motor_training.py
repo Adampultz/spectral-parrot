@@ -61,18 +61,21 @@ class TrainingConfig:
     # Environment
     num_motors: int = 8
     early_stopping_threshold: float = 10
-    max_steps_without_improvement: int = 120
+    max_steps_without_improvement: int = 300
     
     # Motor control
     use_motors: bool = True
+    manual_calibration: bool = False # If True, you will need to manually trigger the motor homing sequence during resets
     motor_speed: int = 200
     motor_reset_speed: int = 200
-    motor_steps: int = 100
+    motor_steps: int = 50
     step_wait_time: float = 1.0
     reset_wait_time: float = 0.3
-    max_ccw_steps: List[int] = field(default_factory=lambda: [3000, 3000, 3000, 4000, 5000, 5000, 5000, 5000])
-    max_cw_steps: List[int] = field(default_factory=lambda: [4000, 4000, 4000, 4000, 4000, 4000, 4000, 4000])
+    max_ccw_steps: List[int] = field(default_factory=lambda: [4000, 4000, 4000, 4000, 5000, 5000, 5000, 5000])
+    max_cw_steps: List[int] = field(default_factory=lambda: [4500, 4500, 4500, 4500, 4500, 4500, 4500, 4500])
     limit_penalty: float = 0.0
+    reset_calibration: int = 1  # 0: calibrate to center, 1: random calibration, 2: skip calibration
+
     
     # Serial ports
     port1: str = "/dev/cu.usbserial-0001"
@@ -87,14 +90,14 @@ class TrainingConfig:
     
     # PPO hyperparameters
     total_timesteps: int = 100000
-    max_ep_length: int = 512
+    max_ep_length: int = 1024
     update_interval: int = 64
     batch_size: int = 32
     n_epochs: int = 10
     
     # Learning rates
-    lr_actor: float = 8e-4
-    lr_critic: float = 8e-4
+    lr_actor: float = 5e-4
+    lr_critic: float = 1e-5
     
     # PPO specific
     gamma: float = 0.995
@@ -104,7 +107,7 @@ class TrainingConfig:
     
     # Network
     hidden_size: int = 64
-    hold_bias: float = 1.7
+    hold_bias: float = 2.0
     
     # Reward
     reward_scale: float = 1.0
@@ -373,7 +376,8 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     logger.info("Creating loss processor...")
     loss_processor = SimpleLossProcessor(
         spectral_loss_calculator=audio.spectral_loss,
-        device=device
+        device=device,
+        step_wait_time=config.step_wait_time
     )
 
     osc_handler = OSCHandler()
@@ -427,7 +431,10 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         reward_scale=config.reward_scale,
         max_ccw_steps=config.max_ccw_steps,
         max_cw_steps=config.max_cw_steps,
-        limit_penalty=config.limit_penalty
+        limit_penalty=config.limit_penalty,
+        adaptive_hold_bias=config.hold_bias,
+        manual_calibration=config.manual_calibration,
+        reset_calibration = config.reset_calibration
     )
     
     # 5. Create PPO agent if not loaded from checkpoint
@@ -464,6 +471,9 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             
             # Take action
             next_obs, reward, terminated, truncated, info = env.step(actions)
+
+            if 'recommended_hold_bias' in info:
+                agent.actor.hold_bias = info['recommended_hold_bias']
             
             # Store transition
             agent.store_transition(obs, actions, log_prob, reward, value, terminated or truncated)
@@ -688,6 +698,12 @@ def main():
     
     # Other arguments
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
+
+    # Motor calibration
+    parser.add_argument('--skip-calibration', action='store_true', 
+                   help='Skip initial motor calibration')
+    parser.add_argument('--calibration-mode', type=int, choices=[0, 1, 2],
+                   help='Calibration mode: 0=center, 1=random (default), 2=skip')
     
     args = parser.parse_args()
     
@@ -729,10 +745,14 @@ def main():
         config.hidden_size = args.hidden_size
     if args.checkpoint_dir:
         config.checkpoint_dir = args.checkpoint_dir
+    if args.skip_calibration:
+        config.reset_calibration = 2
+    if args.calibration_mode is not None:
+        config.reset_calibration = args.calibration_mode
     
     # Run training with resume support
     train(config, resume_from=args.resume)
-
+        
 
 if __name__ == "__main__":
     main()
