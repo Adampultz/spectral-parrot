@@ -224,10 +224,17 @@ class MotorEnvironment(gym.Env):
             # Optional: Move motors to home position
             # This depends on your physical setup
             if self.reset_calibration == 0:
+                logger.info("Calibrating motors to center position")
                 calibrate_full_sequence(self.motor_controller, self.manual_calibration)
             elif self.reset_calibration == 1:
+                logger.info("Calibrating motors to random positions")
                 calibrate_full_sequence_with_random(self.motor_controller, self.manual_calibration)
-        
+            elif self.reset_calibration == 2:
+                logger.info("Skipping motor calibration - using current positions")
+                # No calibration - motors stay at current positions
+            else:
+                logger.warning(f"Unknown reset_calibration value: {self.reset_calibration}. Skipping calibration.")
+                
         # Reset loss processor statistics
         self.loss_processor.reset_stats()
         
