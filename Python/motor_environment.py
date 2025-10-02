@@ -234,7 +234,7 @@ class MotorEnvironment(gym.Env):
                 # No calibration - motors stay at current positions
             else:
                 logger.warning(f"Unknown reset_calibration value: {self.reset_calibration}. Skipping calibration.")
-                
+
         # Reset loss processor statistics
         self.loss_processor.reset_stats()
         
@@ -375,7 +375,7 @@ class MotorEnvironment(gym.Env):
                 else:
                     # Full movement allowed
                     movement_commands[motor_num] = ('CCW', self.motor_steps)
-                    self.motor_positions[i] -= self.motor_steps
+                    # self.motor_positions[i] -= self.motor_steps # Keeping this for now, remove if nothing breaks
                     motors_moving.add(motor_num)
                     
             elif action == 2:  # CW
@@ -392,7 +392,7 @@ class MotorEnvironment(gym.Env):
                 else:
                     # Full movement allowed
                     movement_commands[motor_num] = ('CW', self.motor_steps)
-                    self.motor_positions[i] += self.motor_steps
+                    # self.motor_positions[i] += self.motor_steps # Keeping this for now, remove if nothing breaks
                     motors_moving.add(motor_num)
         
         # Execute motor movements (only motors not blocked by limits)
@@ -410,6 +410,15 @@ class MotorEnvironment(gym.Env):
             completion_info = self._wait_for_motors_completion(
                 motors_moving, movement_commands, timeout=30.0, stabilization_time=self.step_wait_time
             )
+
+            # NOW update positions (after movement confirmed)
+            for motor_num, (direction, steps) in movement_commands.items():
+                motor_idx = motor_num - 1
+                if direction == 'CCW':
+                    self.motor_positions[motor_idx] -= steps
+                else:  # CW
+                    self.motor_positions[motor_idx] += steps
+                logger.debug(f"Motor {motor_num} position updated: {self.motor_positions[motor_idx]}")
         else:
             time.sleep(self.step_wait_time)
         
