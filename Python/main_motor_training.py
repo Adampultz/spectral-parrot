@@ -132,17 +132,17 @@ class TrainingConfig:
 class TrainingState:
     """Class to manage training state for checkpointing."""
     
-    def __init__(self, max_history=1000):
+    def __init__(self, max_history=10000):
         self.episode = 0
         self.timesteps = 0
         self.best_reward = -float('inf')
         # Is it a problem that they grow forever?/
-        self.episode_rewards = []  
-        self.episode_lengths = []   
-        self.episode_losses = []   
-        # self.episode_rewards = deque(maxlen=max_history)
-        # self.episode_lengths = deque(maxlen=max_history)
-        # self.episode_losses = deque(maxlen=max_history)
+        # self.episode_rewards = []  
+        # self.episode_lengths = []   
+        # self.episode_losses = []   
+        self.episode_rewards = deque(maxlen=max_history)
+        self.episode_lengths = deque(maxlen=max_history)
+        self.episode_losses = deque(maxlen=max_history)
         self.training_start_time = time.time()
         
     def to_dict(self):
@@ -524,8 +524,8 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         
         # Calculate rolling averages
         window = min(10, len(training_state.episode_rewards))
-        avg_reward = np.mean(training_state.episode_rewards[-window:])
-        avg_ep_loss = np.mean(training_state.episode_losses[-window:])
+        avg_reward = np.mean(list(training_state.episode_rewards)[-window:])
+        avg_ep_loss = np.mean(list(training_state.episode_losses)[-window:])
         
         logger.info(f"Episode {training_state.episode}: Reward={episode_reward:.2f}, "
                    f"Length={ep_length}, Loss={avg_loss:.4f}, "
