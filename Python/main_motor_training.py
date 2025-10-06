@@ -15,6 +15,7 @@ from typing import Optional, List, Dict, Any
 from pythonosc import udp_client
 from datetime import datetime
 from collections import deque
+from config import TrainingConfig
 import gc
 
 # Setup logging
@@ -38,9 +39,12 @@ from osc_handler import OSCHandler, setup_signal_handlers
 
 # Global for signal handling
 env = None
+osc_handler = None
 
 def signal_handler(sig, frame):
     """Handle shutdown signals gracefully."""
+    global env, osc_handler
+    
     logger.info("Received shutdown signal, cleaning up...")
     if env is not None:
         env.close()
@@ -52,81 +56,78 @@ def signal_handler(sig, frame):
             logger.error(f"Error during OSC cleanup: {e}")
     sys.exit(0)
 
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-
-# Training configuration
-@dataclass
-class TrainingConfig:
-    # Environment
-    num_motors: int = 8
-    early_stopping_threshold: float = 10
-    max_steps_without_improvement: int = 300
+# # Training configuration
+# @dataclass
+# class TrainingConfig:
+#     # Environment
+#     num_motors: int = 8
+#     early_stopping_threshold: float = 10
+#     max_steps_without_improvement: int = 300
     
-    # Motor control
-    use_motors: bool = True
-    manual_calibration: bool = False # If True, you will need to manually trigger the motor homing sequence during resets
-    motor_speed: int = 200
-    motor_reset_speed: int = 200
-    motor_steps: int = 50
-    step_wait_time: float = 1.0
-    reset_wait_time: float = 0.3
-    max_ccw_steps: List[int] = field(default_factory=lambda: [4000, 4000, 4000, 4000, 5000, 5000, 5000, 5000])
-    max_cw_steps: List[int] = field(default_factory=lambda: [4500, 4500, 4500, 4500, 4500, 4500, 4500, 4500])
-    limit_penalty: float = 0.0
-    reset_calibration: int = 1  # 0: calibrate to center, 1: random calibration, 2: skip calibration
+#     # Motor control
+#     use_motors: bool = True
+#     manual_calibration: bool = False # If True, you will need to manually trigger the motor homing sequence during resets
+#     motor_speed: int = 200
+#     motor_reset_speed: int = 200
+#     motor_steps: int = 50
+#     step_wait_time: float = 1.0
+#     reset_wait_time: float = 0.3
+#     max_ccw_steps: List[int] = field(default_factory=lambda: [4000, 4000, 4000, 4000, 5000, 5000, 5000, 5000])
+#     max_cw_steps: List[int] = field(default_factory=lambda: [4500, 4500, 4500, 4500, 4500, 4500, 4500, 4500])
+#     limit_penalty: float = 0.0
+#     reset_calibration: int = 1  # 0: calibrate to center, 1: random calibration, 2: skip calibration
 
     
-    # Serial ports
-    port1: str = "/dev/cu.usbserial-0001"
-    port2: str = "/dev/cu.usbserial-1"
-    baudrate: int = 115200
+#     # Serial ports
+#     port1: str = "/dev/cu.usbserial-0001"
+#     port2: str = "/dev/cu.usbserial-1"
+#     baudrate: int = 115200
     
-    # Audio
-    input_device: Optional[int] = None
-    sample_rate: int = 48000
-    channels: int = 2
-    buffer_size: int = 1024
+#     # Audio
+#     input_device: Optional[int] = None
+#     sample_rate: int = 48000
+#     channels: int = 2
+#     buffer_size: int = 1024
     
-    # PPO hyperparameters
-    total_timesteps: int = 100000
-    max_ep_length: int = 1024
-    update_interval: int = 64
-    batch_size: int = 32
-    n_epochs: int = 10
+#     # PPO hyperparameters
+#     total_timesteps: int = 100000
+#     max_ep_length: int = 1024
+#     update_interval: int = 64
+#     batch_size: int = 32
+#     n_epochs: int = 10
     
-    # Learning rates
-    lr_actor: float = 5e-4
-    lr_critic: float = 1e-5
+#     # Learning rates
+#     lr_actor: float = 5e-4
+#     lr_critic: float = 1e-5
     
-    # PPO specific
-    gamma: float = 0.995
-    gae_lambda: float = 0.95
-    clip_param: float = 0.2
-    entropy_coef: float = 0.01
+#     # PPO specific
+#     gamma: float = 0.995
+#     gae_lambda: float = 0.95
+#     clip_param: float = 0.2
+#     entropy_coef: float = 0.01
     
-    # Network
-    hidden_size: int = 64
-    hold_bias: float = 2.0
+#     # Network
+#     hidden_size: int = 64
+#     hold_bias: float = 2.0
     
-    # Reward
-    reward_scale: float = 1.0
+#     # Reward
+#     reward_scale: float = 1.0
     
-    # Saving
-    save_interval: int = 1
-    plot_frequency: int = 1
-    log_frequency: int = 1
-    checkpoint_dir: str = "./checkpoints"
-    results_dir: str = "./results"
+#     # Saving
+#     save_interval: int = 1
+#     plot_frequency: int = 1
+#     log_frequency: int = 1
+#     checkpoint_dir: str = "./checkpoints"
+#     results_dir: str = "./results"
     
-    def to_dict(self):
-        """Convert config to dictionary for saving."""
-        return asdict(self)
+#     def to_dict(self):
+#         """Convert config to dictionary for saving."""
+#         return asdict(self)
     
-    @classmethod
-    def from_dict(cls, config_dict):
-        """Create config from dictionary."""
-        return cls(**config_dict)
+#     @classmethod
+#     def from_dict(cls, config_dict):
+#         """Create config from dictionary."""
+#         return cls(**config_dict)
 
 
 class TrainingState:
@@ -217,8 +218,8 @@ def save_checkpoint(agent: MotorPPOAgent,
         'episode': training_state.episode,
         'timesteps': training_state.timesteps,
         'best_reward': training_state.best_reward,
-        'latest_rewards': training_state.episode_rewards[-10:] if training_state.episode_rewards else [],
-        'latest_losses': training_state.episode_losses[-10:] if training_state.episode_losses else [],
+        'latest_rewards': list(training_state.episode_rewards)[-10:] if training_state.episode_rewards else [],
+        'latest_losses': list(training_state.episode_losses)[-10:] if training_state.episode_losses else [],
         'timestamp': datetime.now().isoformat()
     }
     
@@ -325,7 +326,13 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         config: Training configuration
         resume_from: Path to checkpoint to resume from (optional)
     """
-    global env
+    global env, osc_handler
+
+    config.print_summary()
+
+    log_level = getattr(logging, config.log_level.upper(), logging.INFO)
+    logging.getLogger().setLevel(log_level)
+    logger.info(f"Logging level set to {config.log_level}")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
@@ -334,7 +341,7 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     create_directories(config)
     
     # Initialize training state
-    training_state = TrainingState()
+    training_state = TrainingState(max_history=config.history_maxlen)
     agent = None
     
     # Resume from checkpoint if specified
@@ -377,12 +384,14 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     loss_processor = SimpleLossProcessor(
         spectral_loss_calculator=audio.spectral_loss,
         device=device,
-        step_wait_time=config.step_wait_time
+        step_wait_time=config.step_wait_time,
+        loss_clip_max=config.loss_clip_max,
+        averaging_window_factor=config.averaging_window_factor,
+        loss_history_buffer_size=config.loss_history_buffer_size
     )
 
     osc_handler = OSCHandler()
-    setup_signal_handlers(osc_handler)
-    
+
     # Start audio
     logger.info("Starting audio system...")
     audio.start()
@@ -434,8 +443,49 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         limit_penalty=config.limit_penalty,
         adaptive_hold_bias=config.hold_bias,
         manual_calibration=config.manual_calibration,
-        reset_calibration = config.reset_calibration
+        reset_calibration = config.reset_calibration,
+        target_loss=config.target_loss,
+        initial_movement_penalty=config.initial_movement_penalty,
+        final_movement_penalty=config.final_movement_penalty,
+        penalty_decay_episodes=config.penalty_decay_episodes,
+        danger_zone_ratio=config.danger_zone_ratio,
+        critical_zone_ratio=config.critical_zone_ratio,
+        ccw_safety_margin=config.ccw_safety_margin,
+        stagnation_threshold=config.stagnation_threshold,
+        stagnation_window=config.stagnation_window,
+        motor_completion_timeout=config.motor_completion_timeout,
+        stabilization_time=config.stabilization_time,
+        loss_clip_max=config.loss_clip_max,
+        use_improvement_bonus=config.use_improvement_bonus,
+        use_consistency_bonus=config.use_consistency_bonus,
+        use_breakthrough_bonus=config.use_breakthrough_bonus,
+        use_movement_penalty=config.use_movement_penalty,
+        use_stagnation_penalty=config.use_stagnation_penalty,
+        use_efficiency_bonus=config.use_efficiency_bonus,
+        use_proximity_bonus=config.use_proximity_bonus,
+        improvement_bonus_weight=config.improvement_bonus_weight,
+        consistency_bonus_weight=config.consistency_bonus_weight,
+        breakthrough_bonus_weight=config.breakthrough_bonus_weight,
+        movement_penalty_weight=config.movement_penalty_weight,
+        efficiency_bonus_weight=config.efficiency_bonus_weight,
+        proximity_threshold_close=config.proximity_threshold_close,
+        proximity_threshold_very_close=config.proximity_threshold_very_close,
+        proximity_bonus_close=config.proximity_bonus_close,
+        proximity_bonus_very_close=config.proximity_bonus_very_close,
+        episode_steps_before_breakthrough=config.episode_steps_before_breakthrough,
+        motors_for_movement_penalty=config.motors_for_movement_penalty,
+        observation_space_loss_max=config.observation_space_loss_max,
+        observation_space_loss_min=config.observation_space_loss_min,
+        use_early_stopping=config.use_early_stopping,      
+        use_truncation=config.use_truncation,               
+        min_episode_steps=config.min_episode_steps,         
+        reward_threshold_for_early_stop=config.reward_threshold_for_early_stop,  
+        log_motor_details=config.log_motor_details          
     )
+
+    # Create signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
     # 5. Create PPO agent if not loaded from checkpoint
     if agent is None:
@@ -452,7 +502,15 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             clip_param=config.clip_param,
             entropy_coef=config.entropy_coef,
             batch_size=config.batch_size,
-            hold_bias=config.hold_bias
+            hold_bias=config.hold_bias,
+            max_grad_norm=config.max_grad_norm,
+            initial_temperature=config.initial_temperature,
+            temperature_decay=config.temperature_decay,
+            min_temperature=config.min_temperature,
+            value_coef=config.value_coef,               
+            normalize_advantages=config.normalize_advantages, 
+            normalize_returns=config.normalize_returns,       
+            use_gae=config.use_gae 
         )
     
     # 6. Training loop (continuing from checkpoint if loaded)
@@ -483,11 +541,11 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             episode_reward += reward
             episode_loss_sum += info['spectral_loss']
             
-            # Log step details occasionally
-            if step % config.log_frequency == 0:
+            # Log step details based on config
+            if step % config.log_frequency == 0 and config.log_motor_details:
                 logger.info(f"Episode {training_state.episode}, Step {step}: "
-                           f"Loss={info['spectral_loss']:.4f}, "
-                           f"Reward={reward:.2f}, Motors moved: {info['motors_moved']}")
+                        f"Loss={info['spectral_loss']:.4f}, "
+                        f"Reward={reward:.2f}, Motors moved: {info['motors_moved']}")
             
             # Move to next state
             obs = next_obs
@@ -511,13 +569,13 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         ep_length = step + 1
         avg_loss = episode_loss_sum / ep_length
 
-        if training_state.episode % 10 == 0:
-            gc.collect()  # Force garbage collection
+        if training_state.episode % config.gc_interval == 0:
+            gc.collect()
             # Also clean up spectral data
             if hasattr(audio.spectral_loss, 'cleanup_old_spectral_data'):
-                audio.spectral_loss.cleanup_old_spectral_data()
-            logger.info("Garbage Collection")
-        
+                audio.spectral_loss.cleanup_old_spectral_data(max_age=config.spectral_data_max_age)
+            logger.debug(f"Garbage collection at episode {training_state.episode}")
+                
         training_state.episode_rewards.append(episode_reward)
         training_state.episode_lengths.append(ep_length)
         training_state.episode_losses.append(avg_loss)
@@ -527,17 +585,26 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         avg_reward = np.mean(list(training_state.episode_rewards)[-window:])
         avg_ep_loss = np.mean(list(training_state.episode_losses)[-window:])
         
-        logger.info(f"Episode {training_state.episode}: Reward={episode_reward:.2f}, "
-                   f"Length={ep_length}, Loss={avg_loss:.4f}, "
-                   f"Avg Reward={avg_reward:.2f}, Avg Loss={avg_ep_loss:.4f}, "
-                   f"Total Timesteps={training_state.timesteps}")
+        if training_state.episode % config.log_episode_summary_freq == 0:
+            logger.info(f"Episode {training_state.episode}: Reward={episode_reward:.2f}, "
+                    f"Length={ep_length}, Loss={avg_loss:.4f}, "
+                    f"Avg Reward={avg_reward:.2f}, Avg Loss={avg_ep_loss:.4f}, "
+                    f"Total Timesteps={training_state.timesteps}")
         
+        # Position status logging
+        if config.log_action_distribution and training_state.episode % config.log_position_status_freq == 0:
+            pos_status = env.get_position_status()
+            logger.info("Motor position status:")
+            for status in pos_status:
+                logger.info(f"  Motor {status['motor']}: pos={status['confirmed_position']}, "
+                        f"uncertain={status['uncertain']}")
+            
         # Adjust learning rate after warm-up
-        if training_state.episode > 20:
-            agent.actor_optimizer.param_groups[0]['lr'] = 3e-4
-            agent.critic_optimizer.param_groups[0]['lr'] = 3e-4
-            if training_state.episode == 21:
-                logger.info("Reduced learning rates to 3e-4 after episode 20")
+        if training_state.episode == config.lr_warmup_episodes + 1:
+            agent.actor_optimizer.param_groups[0]['lr'] = config.lr_reduced_actor
+            agent.critic_optimizer.param_groups[0]['lr'] = config.lr_reduced_critic
+            logger.info(f"Reduced learning rates after {config.lr_warmup_episodes} episodes: "
+                        f"actor={config.lr_reduced_actor}, critic={config.lr_reduced_critic}")
         
         # Render environment occasionally
         if training_state.episode % config.plot_frequency == 0:
@@ -565,7 +632,8 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
                 training_state.episode_losses,
                 training_state.episode_lengths,
                 save_path=os.path.join(config.results_dir, 
-                                       f"progress_ep{training_state.episode}.png")
+                                       f"progress_ep{training_state.episode}.png"),
+                config=config
             )
     
     # Training complete
@@ -594,18 +662,30 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
                        f"HOLD={hold_pct:.1f}%, CW={cw_pct:.1f}%")
     
     # Cleanup
+    logger.info("Cleaning up resources...")
     env.close()
     audio.stop()
 
+    if 'osc_handler' in locals():
+        logger.info("Stopping SuperCollider synths...")
+        osc_handler.cleanup()
 
-def plot_training_progress(rewards, losses, lengths, save_path):
-    """Plot training progress."""
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 10))
+
+def plot_training_progress(rewards, losses, lengths, save_path, config):
+    """Plot training progress with configurable parameters."""
+    fig, (ax1, ax2, ax3) = plt.subplots(
+        3, 1, 
+        figsize=(config.plot_figsize_width, config.plot_figsize_height)
+    )
     
     # Episode rewards
     ax1.plot(rewards, alpha=0.6)
-    if len(rewards) > 10:
-        smoothed = np.convolve(rewards, np.ones(10)/10, mode='valid')
+    if len(rewards) > config.plot_smoothing_window:
+        smoothed = np.convolve(
+            rewards, 
+            np.ones(config.plot_smoothing_window) / config.plot_smoothing_window, 
+            mode='valid'
+        )
         ax1.plot(range(len(smoothed)), smoothed, 'r-', linewidth=2)
     ax1.set_ylabel('Episode Reward')
     ax1.set_title('Training Progress')
@@ -613,8 +693,12 @@ def plot_training_progress(rewards, losses, lengths, save_path):
     
     # Spectral loss
     ax2.plot(losses, alpha=0.6)
-    if len(losses) > 10:
-        smoothed = np.convolve(losses, np.ones(10)/10, mode='valid')
+    if len(losses) > config.plot_smoothing_window:
+        smoothed = np.convolve(
+            losses, 
+            np.ones(config.plot_smoothing_window) / config.plot_smoothing_window, 
+            mode='valid'
+        )
         ax2.plot(range(len(smoothed)), smoothed, 'r-', linewidth=2)
     ax2.set_ylabel('Average Spectral Loss')
     ax2.set_yscale('log')
@@ -627,7 +711,11 @@ def plot_training_progress(rewards, losses, lengths, save_path):
     ax3.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
+    
+    if config.save_plots:
+        plt.savefig(save_path, dpi=config.plot_dpi)
+        logger.debug(f"Plot saved to {save_path}")
+    
     plt.close()
 
 
@@ -671,6 +759,9 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='Motor control training with MSSL')
+
+    # Config file argument (highest priority)
+    parser.add_argument('--config', type=str, help='Path to config file (JSON)')
     
     # Audio arguments
     parser.add_argument('--input-device', type=int, help='Input audio device index')
@@ -698,6 +789,7 @@ def main():
     
     # Other arguments
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
+    parser.add_argument('--save-config', type=str, help='Save current config to file and exit')
 
     # Motor calibration
     parser.add_argument('--skip-calibration', action='store_true', 
@@ -722,8 +814,11 @@ def main():
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
     
-    # Create config
-    config = TrainingConfig()
+    # Load config (priority: --config file > default file > hardcoded defaults)
+    if args.config:
+        config = TrainingConfig.load(args.config)
+    else:
+        config = TrainingConfig.load_or_default("./config.json")
     
     # Override with command line arguments
     if args.input_device is not None:
@@ -748,11 +843,15 @@ def main():
     if args.skip_calibration:
         config.reset_calibration = 2
     if args.calibration_mode is not None:
-        config.reset_calibration = args.calibration_mode
+        config.reset_calibration = args.calibration_mode 
+
+    # Save config if requested
+    if args.save_config:
+        config.save(args.save_config)
+        return
     
     # Run training with resume support
-    train(config, resume_from=args.resume)
-        
+    train(config, resume_from=args.resume)      
 
 if __name__ == "__main__":
     main()
