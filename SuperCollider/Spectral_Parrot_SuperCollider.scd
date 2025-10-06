@@ -52,13 +52,16 @@ s.options.inDevice_(
 ~ampDiffs = 8.collect{Bus.control(s).set(0.1)};
 ~sineStates = 8.collect{Bus.control(s).set(0.1)};
 ~stringGain = 8.collect{Bus.control(s).set(1.0)};
-~trainingAudioSel = 3; // 0 = Audio input, 1 = Sample, 2 = harmonic sine spectrums, 3 = Summed sines (random frequencies),
+~trainingAudioSel = 1; // 0 = Audio input, 1 = Sample, 2 = harmonic sine spectrums, 3 = Summed sines (random frequencies),
 ~integration_factor = 0.2;
 /*
 ~trainingAudioAddress = "/Users/adammac2023/Documents/Musik-business/Adam/2024/STIP-4/Audio/Training sets/Drones_summed.wav";*/
 
 
-~trainingAudioAddress = "/Users/adammac2023/Documents/Musik-business/Adam/2024/STIP-4/Audio/Training sets/DB_3rd_string.wav";
+~trainingAudioAddress = "/Users/adammac2023/Documents/Musik-business/Projects/Spectral Parrot/Audio/Training Audio/2.09.2025/untitled_01.wav";
+
+/*~trainingAudioAddress = "/Users/adammac2023/Documents/Musik-business/Projects/Spectral Parrot/Audio/Training Audio/15.09.2025/2.wav";*/
+
 
 ~pythonOSCAddress = NetAddr("127.0.0.1", 3333);  // Python's receiving port
 
@@ -131,12 +134,12 @@ OSCdef(\resetOscillators, {|msg, time, addr, recvPort|
 }, '/reset_oscillators');
 
 createOSCHandler = {|name, key, port|
-	var running = False;
+	var running = False;  // Capital F like before
 	OSCdef(name,
 		{ |msg, time, addr, recvPort|
-			// "OSCdef received:".postln;
 			msg.postln;
 			running.postln;
+
 			if (msg[1] == true, {
 				if (running == False, {
 					{
@@ -146,22 +149,21 @@ createOSCHandler = {|name, key, port|
 					}.fork;
 				})
 			});
-			if (running == True, {
-				"SuperCollider shutting down".postln;
-				if (msg[1] == false,  {
+
+			if (msg[1] == false, {  // Changed: check message directly
+				if (running == True, {
+					"SuperCollider shutting down".postln;
 					{
-			~trainingSynth.free;
+						~trainingSynth.free;
 						~stringSynth.free;
-						~oscSynth.do{|i|
-							i.free};
+						~oscSynth.do{|i| i.free};
 						s.sync;
+						running = False;  // ADD THIS - reset to False
 					}.fork;
 				})
 			})
 		},
-		key,
-		nil,
-		port
+		key, nil, port
 	).permanent_(true);
 };
 
@@ -224,7 +226,6 @@ s.waitForBoot({
 					SinOsc.ar(freq) * AmpComp.kr(freq) * amp * 0.05})]);
 		Out.ar(outBlackhole, src);
 		Out.ar(outChanMonitor, src);
-/*		Out.ar(analysisBus, src);*/
 	}).add;
 
 	SynthDef(\strings, {
@@ -237,7 +238,7 @@ s.waitForBoot({
 
 		// Get amplitude of each string
 		amp = RMS.ar(oscArray, 20).ampdb.linlin(-70.0, -15.0, 0, 1.0);
-		amp = Integrator.ar(amp, ~integration_factor).clip(0.0, 1.0).scope;
+		amp = Integrator.ar(amp, ~integration_factor).clip(0.0, 1.0);
 
 		// Calculate the amplitude difference between a string and its neighbors
 		ampDiffNeighbours = 8.collect{|i|
@@ -265,14 +266,11 @@ s.waitForBoot({
 		8.do{|i| Out.kr(~ampDiffs[i], ampDiffNeighbours[i])};
 		8.do{|i| Out.kr(~sineStates[i], sineState[i])};
 
-		sumSigs = Mix(LeakDC.ar(oscArray * sineAM)) * 4.0;
-
-		sumSigs.scope;
+		sumSigs = Mix(LeakDC.ar(oscArray * sineAM)) * 3.0;
 
 		// Output mixed signal
 		Out.ar(outChan, sumSigs);
 		Out.ar(outBlackhole, Mix(oscArray));
-		// Out.ar(analysisBus, sumSigs);
 	}).add;
 
 });
