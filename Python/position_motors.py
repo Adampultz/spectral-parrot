@@ -3,16 +3,46 @@ import argparse
 import time
 import signal
 import sys
+import logging
+import random
 from Stepper_Control import DualESP32StepperController
-from motor_environment import MotorEnvironment
 
-_motor_env = MotorEnvironment(None, None)
+logger = logging.getLogger(__name__)
 
 # Global variable to hold controller reference for signal handler
 motor_controller = None
 motor_speed = 200
 motor_steps = 500
 completion_time = 20
+manual_calibration = False
+
+def map_internal_to_global_motor( esp_num, internal_motor_num):
+        """
+        Map internal motor number (1-4) from ESP32 to global motor number (1-8).
+        
+        ESP32 #1 controls ODD motors: 
+            internal 1 -> global 1
+            internal 2 -> global 3
+            internal 3 -> global 5
+            internal 4 -> global 7
+            
+        ESP32 #2 controls EVEN motors:
+            internal 1 -> global 2
+            internal 2 -> global 4
+            internal 3 -> global 6
+            internal 4 -> global 8
+        """
+        if internal_motor_num < 1 or internal_motor_num > 4:
+            logger.error(f"Invalid internal motor number: {internal_motor_num}")
+            return None
+            
+        if esp_num == 1:  # Odd motors
+            return (internal_motor_num * 2) - 1
+        elif esp_num == 2:  # Even motors  
+            return internal_motor_num * 2
+        else:
+            logger.error(f"Invalid ESP32 number: {esp_num}")
+            return None
 
 def emergency_shutdown(signum=None, frame=None):
     """Emergency shutdown procedure for motors"""
@@ -53,7 +83,7 @@ def listen_for_completion(controller, duration=completion_time):
         
         for esp_num in [1, 2]:
             for response in responses[esp_num]:
-                print(f"ESP32 #{esp_num}: {response}")
+                # print(f"ESP32 #{esp_num}: {response}")
                 
                 if "movement completed" in response.lower():
                     msg = f"Motor completion message from ESP32 #{esp_num}: {response}"
@@ -89,11 +119,12 @@ def calibrate_find_cw_limits(controller, speed=200):
     print("  2. StallGuard thresholds are properly configured")
     print("  3. You're ready to manually stop if needed (Ctrl+C)")
     print(f"\nCalibration speed: {speed} (slow for safety)")
-    
-    response = input("\nProceed with CW limit calibration? (y/n): ").strip().lower()
-    if response != 'y':
-        print("Calibration cancelled")
-        return
+
+    if manual_calibration:
+        response = input("\nProceed with CW limit calibration? (y/n): ").strip().lower()
+        if response != 'y':
+            print("Calibration cancelled")
+            return
     
     print("\n" + "-"*60)
     
@@ -132,7 +163,7 @@ def calibrate_find_cw_limits(controller, speed=200):
         
         for esp_num in [1, 2]:
             for response in responses[esp_num]:
-                print(f"ESP32 #{esp_num}: {response}")
+                # print(f"ESP32 #{esp_num}: {response}")
                 
                 # Look for StallGuard detection
                 if "STALL DETECTED" in response:
@@ -142,7 +173,7 @@ def calibrate_find_cw_limits(controller, speed=200):
                         if part.lower() == "motor" and i + 1 < len(parts):
                             try:
                                 internal_motor_num = int(response.split(":")[1])
-                                global_motor_num = _motor_env._map_internal_to_global_motor(esp_num, internal_motor_num)
+                                global_motor_num = map_internal_to_global_motor(esp_num, internal_motor_num)
                                 if global_motor_num:
                                     motors_stopped.add(global_motor_num)
                                     print(f"\n✓ Motor {global_motor_num} reached CW limit (StallGuard triggered)")
@@ -153,7 +184,7 @@ def calibrate_find_cw_limits(controller, speed=200):
                 elif "MOTOR_COMPLETE:" in response:
                     try:
                         internal_motor_num = int(response.split(":")[1])
-                        global_motor_num = _motor_env._map_internal_to_global_motor(esp_num, internal_motor_num)
+                        global_motor_num = map_internal_to_global_motor(esp_num, internal_motor_num)
                         if global_motor_num:
                             motors_stopped.add(global_motor_num)
                         print(f"✓ Motor {global_motor_num} stopped")
@@ -202,10 +233,11 @@ def calibrate_find_ccw_position(controller, target_position=-4000, speed=200):
     print("\nThis assumes motors are currently at their CW limits.")
     print(f"Will move all motors {abs(target_position)} steps counter-clockwise.")
     
-    response = input(f"\nMove all motors to position {target_position}? (y/n): ").strip().lower()
-    if response != 'y':
-        print("Positioning cancelled")
-        return
+    if manual_calibration:
+        response = input(f"\nMove all motors to position {target_position}? (y/n): ").strip().lower()
+        if response != 'y':
+            print("Positioning cancelled")
+            return
     
     # Set speed
     print(f"Setting speed to {speed}...")
@@ -218,9 +250,11 @@ def calibrate_find_ccw_position(controller, target_position=-4000, speed=200):
     print(f"Moving all motors {steps_to_move} steps CCW...")
     
     for motor in range(1, 9):
+        controller.send_command(motor, "INHIBIT_SG", 1)  # Disable stallguard triggering
         controller.set_direction(motor, 0)  # 0 = CCW
         controller.move_steps(motor, steps_to_move)
         print(f"  Motor {motor}: Moving CCW {steps_to_move} steps")
+        logger.info(f"Inhibited StallGuard triggering for motor {motor}")
         time.sleep(7.0)
     
     # Wait for completion
@@ -248,7 +282,7 @@ def calibrate_find_ccw_position(controller, target_position=-4000, speed=200):
                         if part.lower() == "motor" and i + 1 < len(parts):
                             try:
                                 internal_motor_num = int(parts[i + 1])
-                                global_motor_num = _motor_env._map_internal_to_global_motor(esp_num, internal_motor_num)
+                                global_motor_num = map_internal_to_global_motor(esp_num, internal_motor_num)
                                 
                                 if global_motor_num and global_motor_num not in motors_stopped_early and global_motor_num not in motors_completed_full:
                                     motors_stopped_early.add(global_motor_num)
@@ -261,11 +295,13 @@ def calibrate_find_ccw_position(controller, target_position=-4000, speed=200):
                 elif "MOTOR_COMPLETE:" in response:
                     try:
                         internal_motor_num = int(response.split(":")[1].strip())
-                        global_motor_num = _motor_env._map_internal_to_global_motor(esp_num, internal_motor_num)
+                        global_motor_num = map_internal_to_global_motor(esp_num, internal_motor_num)
                         
                         if global_motor_num and global_motor_num not in motors_completed_full and global_motor_num not in motors_stopped_early:
                             motors_completed_full.add(global_motor_num)
                             print(f"✓ Motor {global_motor_num} completed full movement")
+                            controller.send_command(global_motor_num, "ALLOW_SG", 1)
+                            logger.info(f"Allowed StallGuard triggering for motor {global_motor_num}")
                     except (ValueError, IndexError):
                         pass
         
@@ -275,6 +311,11 @@ def calibrate_find_ccw_position(controller, target_position=-4000, speed=200):
             print(f"\rProgress: {total_done}/8 motors done ({len(motors_completed_full)} full, {len(motors_stopped_early)} early)", end='')
         
         time.sleep(0.2)
+
+    print("\nRe-enabling StallGuard for all motors...")
+    for motor in range(1, 9):
+        controller.send_command(motor, "ALLOW_SG", 1)
+        time.sleep(0.05)
     
     print("\n\n" + "="*60)
     print("POSITIONING RESULTS")
@@ -307,7 +348,187 @@ def calibrate_find_ccw_position(controller, target_position=-4000, speed=200):
         'success': len(motors_completed_full) == 8
     }
 
-def calibrate_full_sequence(controller):
+def calibrate_random_position(controller, center_position=-4000, random_range=2000, speed=200, manual_calibration=False):
+    """
+    Move all motors to random positions around center from their current CW limit position.
+    Each motor gets an individual random offset of ±random_range from center_position.
+    
+    Args:
+        controller: The motor controller instance
+        center_position: Center position in steps from CW limit (default: -4000)
+        random_range: Random offset range in steps (default: ±2000)
+        speed: Movement speed (default: 200)
+        manual_calibration: Whether to ask for user confirmation
+    """
+    # Generate random offsets for each motor
+    random_offsets = [random.randint(-random_range, random_range) for _ in range(8)]
+    target_positions = [center_position + offset for offset in random_offsets]
+    
+    print("\n" + "="*60)
+    print("CALIBRATION: Moving to Random Positions")
+    print("="*60)
+    print(f"\nCenter position: {center_position} steps from CW limit")
+    print(f"Random range: ±{random_range} steps")
+    print("\nRandom target positions for each motor:")
+    for i, (offset, target) in enumerate(zip(random_offsets, target_positions), 1):
+        print(f"  Motor {i}: {center_position} + ({offset:+d}) = {target} steps from CW limit")
+    
+    # Safety check - ensure no position goes beyond reasonable limits
+    min_safe_position = -8000  # Don't go more than 8000 steps CCW from CW limit
+    max_safe_position = -1000  # Don't go closer than 1000 steps to CW limit
+    
+    safe_positions = []
+    warnings = []
+    for i, target in enumerate(target_positions, 1):
+        if target < min_safe_position:
+            safe_target = min_safe_position
+            warnings.append(f"Motor {i}: Limited to {safe_target} (was {target})")
+        elif target > max_safe_position:
+            safe_target = max_safe_position
+            warnings.append(f"Motor {i}: Limited to {safe_target} (was {target})")
+        else:
+            safe_target = target
+        safe_positions.append(safe_target)
+    
+    if warnings:
+        print(f"\n⚠️  Safety limits applied:")
+        for warning in warnings:
+            print(f"  {warning}")
+    
+    print(f"\nThis assumes motors are currently at their CW limits.")
+    
+    if manual_calibration:
+        response = input(f"\nProceed with random positioning? (y/n): ").strip().lower()
+        if response != 'y':
+            print("Random positioning cancelled")
+            return
+    
+    # Set speed for all motors
+    print(f"Setting speed to {speed}...")
+    for motor in range(1, 9):
+        controller.set_speed(motor, speed)
+        time.sleep(0.05)
+    
+    # Move each motor to its individual random position
+    print(f"Moving motors to random positions...")
+    
+    for motor_num in range(1, 9):
+        target_pos = safe_positions[motor_num - 1]
+        steps_to_move = abs(target_pos)
+        
+        controller.send_command(motor_num, "INHIBIT_SG", 1)  # Disable stallguard triggering
+        controller.set_direction(motor_num, 0)  # 0 = CCW
+        controller.move_steps(motor_num, steps_to_move)
+        print(f"  Motor {motor_num}: Moving CCW {steps_to_move} steps to position {target_pos}")
+        logger.info(f"Inhibited StallGuard triggering for motor {motor_num}")
+        time.sleep(7.0)  # Delay between motor starts
+    
+    # Wait for completion
+    max_steps = max(abs(pos) for pos in safe_positions)
+    estimated_time = max_steps / (speed * 256) + 2
+    print(f"\nWaiting for motors to reach random positions...")
+    print(f"Estimated completion time: {estimated_time:.1f} seconds")
+    time.sleep(estimated_time)
+    
+    # Monitor completion with proper tracking
+    start_time = time.time()
+    timeout = 60
+    motors_completed_full = set()      # Motors that completed the full movement
+    motors_stopped_early = set()       # Motors that stopped early (StallGuard)
+    
+    while len(motors_completed_full) + len(motors_stopped_early) < 8 and (time.time() - start_time < timeout):
+        responses = controller.get_responses()
+        
+        for esp_num in [1, 2]:
+            for response in responses[esp_num]:
+                if not response.strip():
+                    continue
+                
+                # Handle STALL DETECTED (motor hit CCW limit)
+                if "STALL DETECTED" in response:
+                    parts = response.split()
+                    for i, part in enumerate(parts):
+                        if part.lower() == "motor" and i + 1 < len(parts):
+                            try:
+                                internal_motor_num = int(parts[i + 1])
+                                global_motor_num = map_internal_to_global_motor(esp_num, internal_motor_num)
+                                
+                                if global_motor_num and global_motor_num not in motors_stopped_early and global_motor_num not in motors_completed_full:
+                                    motors_stopped_early.add(global_motor_num)
+                                    print(f"⚠️  Motor {global_motor_num} stopped early (hit CCW limit)")
+                                break
+                            except (ValueError, IndexError):
+                                pass
+                
+                # Handle MOTOR_COMPLETE (motor completed full movement)
+                elif "MOTOR_COMPLETE:" in response:
+                    try:
+                        internal_motor_num = int(response.split(":")[1].strip())
+                        global_motor_num = map_internal_to_global_motor(esp_num, internal_motor_num)
+                        
+                        if global_motor_num and global_motor_num not in motors_completed_full and global_motor_num not in motors_stopped_early:
+                            motors_completed_full.add(global_motor_num)
+                            print(f"✅ Motor {global_motor_num} reached random position")
+                            controller.send_command(global_motor_num, "ALLOW_SG", 1)
+                            logger.info(f"Allowed StallGuard triggering for motor {global_motor_num}")
+                    except (ValueError, IndexError):
+                        pass
+        
+        # Show progress
+        total_done = len(motors_completed_full) + len(motors_stopped_early)
+        if total_done > 0:
+            print(f"\rProgress: {total_done}/8 motors positioned ({len(motors_completed_full)} full, {len(motors_stopped_early)} early)", end='')
+        
+        time.sleep(0.2)
+
+    print("\nRe-enabling StallGuard for all motors...")
+    for motor in range(1, 9):
+        controller.send_command(motor, "ALLOW_SG", 1)
+        time.sleep(0.05)
+    
+    print("\n\n" + "="*60)
+    print("RANDOM POSITIONING RESULTS")
+    print("="*60)
+    
+    if len(motors_completed_full) == 8:
+        print("✅ ALL MOTORS positioned correctly")
+        print("All motors successfully moved to their random positions")
+    
+    elif len(motors_completed_full) + len(motors_stopped_early) == 8:
+        print("⚠️  MIXED RESULTS - Some motors stopped early")
+        print(f"Motors positioned correctly: {sorted(motors_completed_full)} ({len(motors_completed_full)}/8)")
+        print(f"Motors stopped early (hit CCW limit): {sorted(motors_stopped_early)} ({len(motors_stopped_early)}/8)")
+        
+        if motors_stopped_early:
+            print(f"\n💡 Motors {sorted(motors_stopped_early)} may need:")
+            print(f"   - Smaller random range (try ±1000 instead of ±{random_range})")
+            print(f"   - Different center position (try -3000 instead of {center_position})")
+    
+    else:
+        missing = set(range(1, 9)) - motors_completed_full - motors_stopped_early
+        print(f"❌ INCOMPLETE - Motors didn't respond: {sorted(missing)}")
+    
+    print("="*60)
+    
+    # Print final positions summary
+    print("\nFinal Random Positions Summary:")
+    for i, (offset, target, safe_pos) in enumerate(zip(random_offsets, target_positions, safe_positions), 1):
+        status = "✅" if i in motors_completed_full else ("⚠️" if i in motors_stopped_early else "❌")
+        if target != safe_pos:
+            print(f"  Motor {i}: {status} {safe_pos} steps (limited from {target})")
+        else:
+            print(f"  Motor {i}: {status} {safe_pos} steps")
+    
+    return {
+        'completed_full': motors_completed_full,
+        'stopped_early': motors_stopped_early,
+        'success': len(motors_completed_full) == 8,
+        'positions': safe_positions,
+        'offsets': random_offsets
+    }
+
+
+def calibrate_full_sequence(controller, manual_calibration=False):
     """
     Full calibration sequence:
     1. Find CW limits using StallGuard
@@ -320,28 +541,31 @@ def calibrate_full_sequence(controller):
     print("  1. Move all motors CW until StallGuard triggers (find limits)")
     print("  2. Move all motors CCW to center position")
     print("  3. Set this as the calibrated center/home position")
-    
-    response = input("\nStart full calibration? (y/n): ").strip().lower()
-    if response != 'y':
-        print("Calibration cancelled")
-        return
+
+    if manual_calibration:
+        response = input("\nStart full calibration? (y/n): ").strip().lower()
+        if response != 'y':
+            print("Calibration cancelled")
+            return
     
     # Step 1: Find CW limits
     print("\n--- STEP 1: Finding CW Limits ---")
-    motors_calibrated = calibrate_find_cw_limits(controller, speed=5)
+    motors_calibrated = calibrate_find_cw_limits(controller, speed=motor_speed)
     
     if len(motors_calibrated) != 8:
         print("\n⚠️  Not all motors found their limits.")
-        response = input("Continue anyway? (y/n): ").strip().lower()
-        if response != 'y':
-            return
+
+        if manual_calibration:
+            response = input("Continue anyway? (y/n): ").strip().lower()
+            if response != 'y':
+                return
     
     time.sleep(2)
     
     # Step 2: Move to center
     print("\n--- STEP 2: Moving to Center Position ---")
-    center_offset = -5000  # 5000 steps CCW from CW limit
-    calibrate_find_ccw_position(controller, target_position=center_offset, speed=5)
+    center_offset = -4000  # 4000 steps CCW from CW limit
+    calibrate_find_ccw_position(controller, target_position=center_offset, speed=motor_speed)
     
     print("\n" + "="*70)
     print("✅ CALIBRATION COMPLETE")
@@ -352,6 +576,56 @@ def calibrate_full_sequence(controller):
     print("  1. Run your training script")
     print("  2. Fine-tune individual motor positions")
     print("  3. Save this as your standard starting position")
+
+def calibrate_full_sequence_with_random(controller, manual_calibration=False):
+    """
+    Full calibration sequence with random positioning:
+    1. Find CW limits using StallGuard
+    2. Move to random positions around center
+    """
+    print("\n" + "="*70)
+    print("FULL CALIBRATION SEQUENCE (WITH RANDOM POSITIONING)")
+    print("="*70)
+    print("\nThis will:")
+    print("  1. Move all motors CW until StallGuard triggers (find limits)")
+    print("  2. Move all motors CCW to random positions around center")
+    print("  3. Set these as the randomized starting positions")
+
+    if manual_calibration:
+        response = input("\nStart full calibration with random positioning? (y/n): ").strip().lower()
+        if response != 'y':
+            print("Calibration cancelled")
+            return
+    
+    # Step 1: Find CW limits
+    print("\n--- STEP 1: Finding CW Limits ---")
+    motors_calibrated = calibrate_find_cw_limits(controller, speed=motor_speed)
+    
+    if len(motors_calibrated) != 8:
+        print("\n⚠️  Not all motors found their limits.")
+
+        if manual_calibration:
+            response = input("Continue anyway? (y/n): ").strip().lower()
+            if response != 'y':
+                return
+    
+    time.sleep(2)
+    
+    # Step 2: Move to random positions
+    print("\n--- STEP 2: Moving to Random Positions ---")
+    result = calibrate_random_position(controller, speed=motor_speed, manual_calibration=False)
+    
+    print("\n" + "="*70)
+    print("✅ RANDOMIZED CALIBRATION COMPLETE")
+    print("="*70)
+    print("\nMotors are now at randomized positions around center.")
+    print(f"Random offsets applied: {result.get('offsets', 'N/A')}")
+    print("\nYou can now:")
+    print("  1. Run your training script")
+    print("  2. Re-randomize positions with 'cal random'")
+    print("  3. Move to standard center with 'cal center'")
+    
+    return result 
 
 def calibrate_individual_motor(controller, motor_num):
     """
@@ -382,7 +656,7 @@ def calibrate_individual_motor(controller, motor_num):
         esp_num = 1 if motor_num % 2 == 1 else 2
         
         for response in responses[esp_num]:
-            print(f"ESP32 #{esp_num}: {response}")
+            # print(f"ESP32 #{esp_num}: {response}")
             
             if "STALL DETECTED" in response or "MOTOR_COMPLETE" in response:
                 try:
@@ -402,7 +676,7 @@ def calibrate_individual_motor(controller, motor_num):
                     
                     # Map internal motor number to global motor number
                     if internal_motor_num is not None:
-                        global_motor_num = _motor_env._map_internal_to_global_motor(esp_num, internal_motor_num)
+                        global_motor_num = map_internal_to_global_motor(esp_num, internal_motor_num)
                         
                         # Check if this is the motor we're calibrating
                         if global_motor_num == motor_num:
@@ -464,7 +738,7 @@ def test_completion_for_motor(controller, motor_num, steps=motor_steps):
         
         for resp_esp_num in [1, 2]:
             for response in responses[resp_esp_num]:
-                print(f"ESP32 #{resp_esp_num}: {response}")
+                # print(f"ESP32 #{resp_esp_num}: {response}")
                 
                 # Check for MOTOR_COMPLETE format
                 if "MOTOR_COMPLETE:" in response:
@@ -573,6 +847,7 @@ def interactive_motor_positioning(port1, port2, baudrate=115200):
     print("\nCalibration Commands:")
     print("  cal limits           - Find CW limits for all motors")
     print("  cal center           - Move to center from current position")
+    print("  cal random           - Move to random positions around center") 
     print("  cal full             - Full calibration sequence")
     print("  cal motor <num>      - Calibrate individual motor")
 
@@ -610,6 +885,8 @@ def interactive_motor_positioning(port1, port2, baudrate=115200):
                             print("Motor number must be 1-8")
                     except ValueError:
                         print("Invalid motor number")
+                elif cal_type == "random":
+                    calibrate_random_position(motor_controller, manual_calibration=manual_calibration)
                 else:
                     print("Unknown calibration command")
                 
