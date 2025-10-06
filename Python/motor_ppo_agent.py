@@ -47,7 +47,6 @@ class MotorPPOMemory:
         batches = [indices[i:i+self.batch_size] for i in batch_start]
         return batches
 
-
 class MotorPPOAgent:
     """
     Simplified PPO agent for motor control.
@@ -57,7 +56,12 @@ class MotorPPOAgent:
                  hidden_size=64, lr_actor=3e-4, lr_critic=3e-4,
                  gamma=0.99, gae_lambda=0.95, clip_param=0.2,
                  value_coef=0.5, entropy_coef=0.01, max_grad_norm=0.5,
-                 batch_size=64, hold_bias=0.5):
+                 batch_size=64, hold_bias=0.5, initial_temperature=2.0,
+                 temperature_decay=0.998,
+                 min_temperature=0.3, 
+                 normalize_advantages=True,   
+                 normalize_returns=False,         
+                 use_gae=True):
         """Initialize the motor PPO agent."""
         self.device = device
         self.gamma = gamma
@@ -67,6 +71,11 @@ class MotorPPOAgent:
         self.entropy_coef = entropy_coef
         self.max_grad_norm = max_grad_norm
         self.num_motors = num_motors
+        self.max_grad_norm = max_grad_norm
+        self.initial_temperature = initial_temperature
+        self.temperature_decay = temperature_decay
+        self.min_temperature = min_temperature
+        self.current_temperature = initial_temperature
         
         # Import the motor actor network
         from motor_actor_network import MotorActorNetwork
@@ -94,9 +103,14 @@ class MotorPPOAgent:
         
         # Exploration temperature schedule
         self.initial_temperature = 2.0  # Up from 1.0
-        self.temperature_decay = 0.995 
+        self.temperature_decay = 0.998 
         self.min_temperature = 0.3
         self.current_temperature = self.initial_temperature
+
+        self.value_coef = value_coef
+        self.normalize_advantages = normalize_advantages
+        self.normalize_returns = normalize_returns
+        self.use_gae = use_gae
         
     def select_action(self, state):
         """
@@ -142,7 +156,16 @@ class MotorPPOAgent:
             actor_loss, critic_loss: Average losses
         """
         # Compute returns and advantages
-        returns = self.compute_gae(next_value)
+        if self.use_gae:
+            returns = self.compute_gae(next_value)
+        else:
+            # Simple discounted returns
+            returns = self._compute_simple_returns(next_value)
+
+        if self.normalize_returns and len(returns) > 1:
+            returns_array = np.array(returns)
+            returns = (returns_array - returns_array.mean()) / (returns_array.std() + 1e-8)
+            returns = returns.tolist()
 
         logger.debug(f"GAE Returns stats: min={min(returns):.2f}, max={max(returns):.2f}, "
                 f"mean={np.mean(returns):.2f}, std={np.std(returns):.2f}")
@@ -175,7 +198,8 @@ class MotorPPOAgent:
                 
                 # Compute advantages
                 advantages = batch_returns - state_values.detach()
-                if len(advantages) > 1:
+
+                if self.normalize_advantages and len(advantages) > 1:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
                 
                 # PPO loss
@@ -220,6 +244,20 @@ class MotorPPOAgent:
         self.actor.set_temperature(self.current_temperature)
         
         return np.mean(actor_losses), np.mean(critic_losses)
+    
+    def _compute_simple_returns(self, next_value):
+        """Compute simple discounted returns without GAE."""
+        rewards = self.memory.rewards
+        dones = self.memory.dones
+        
+        returns = []
+        R = next_value
+        
+        for step in reversed(range(len(rewards))):
+            R = rewards[step] + self.gamma * R * (1 - dones[step])
+            returns.insert(0, R)
+        
+        return returns
     
     def compute_gae(self, next_value):
         """Compute returns using Generalized Advantage Estimation."""
