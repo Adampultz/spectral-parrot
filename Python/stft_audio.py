@@ -582,7 +582,7 @@ class MultiScaleSpectralLoss:
         """
         Compute spectral loss at a single scale using shape-based comparison.
         This ignores overall volume differences and focuses on spectral shape.
-        Fixed to handle silent and identical signals correctly.
+        FIXED: Handles identical signals correctly and removes log bias.
         """
         # Get amplitude spectra (these are float32 from STFT)
         stft_x_f32 = ch1_data['amplitude']  
@@ -600,6 +600,11 @@ class MultiScaleSpectralLoss:
         # Compute difference
         diff = stft_x - stft_y
 
+        # EARLY EXIT: If signals are truly identical, return 0 immediately
+        max_abs_diff = np.max(np.abs(diff))
+        if max_abs_diff < 1e-12:  # More stringent threshold
+            return 0.0, 0
+
         # Get the sign of the difference
         overall_bias = np.sum(diff)
         direction = np.sign(overall_bias)
@@ -609,7 +614,7 @@ class MultiScaleSpectralLoss:
         frobenius_norm_x = np.linalg.norm(stft_x)
         frobenius_norm_y = np.linalg.norm(stft_y)
         
-        # FIX: Handle silent/identical signals properly
+        # Handle silent/identical signals properly
         if frobenius_norm_x < 1e-8 and frobenius_norm_y < 1e-8:
             # Both signals are silent - no difference
             normalized_frobenius = 0.0
@@ -623,22 +628,19 @@ class MultiScaleSpectralLoss:
             # Normal case - reference has signal
             normalized_frobenius = frobenius_norm_diff / frobenius_norm_x
         
-        # Component 2: Log L1 norm
+        # Component 2: FIXED Log L1 norm
         l1_norm_diff = np.sum(np.abs(diff))
         
-        # FIX: Only add log component if there's actual difference
-        if l1_norm_diff > 1e-10:
-            log_l1 = np.log(l1_norm_diff + 1.0)
+        # FIX: Use small epsilon instead of +1.0 to avoid bias
+        if l1_norm_diff > 1e-12:  # Stricter threshold
+            eps = 1e-15  # Small epsilon to prevent log(0)
+            log_l1 = np.log(l1_norm_diff + eps)
         else:
             log_l1 = 0.0  # No difference = no log component
         
         # Total loss for this scale
         scale_loss = normalized_frobenius + log_l1
         
-        # Additional safety: if signals are identical, loss should be 0
-        if frobenius_norm_diff < 1e-10:
-            scale_loss = 0.0
-            
         return scale_loss, direction
         
     def get_current_losses(self):
@@ -779,35 +781,6 @@ class EnhancedAudio(SimpleAudio):
                 channel_1_data = audio_data[:, 0] if audio_data.shape[1] > 0 else audio_data.flatten()
                 channel_2_data = audio_data[:, 1] if audio_data.shape[1] > 1 else channel_1_data
         
-        def debug_channel_data(channel_1_data, channel_2_data):
-            """Check if channel data is actually identical"""
-            if len(channel_1_data) == len(channel_2_data):
-                diff = np.abs(channel_1_data - channel_2_data)
-                max_diff = np.max(diff)
-                mean_diff = np.mean(diff)
-                
-                # Check if both channels are silent
-                ch1_silent = np.max(np.abs(channel_1_data)) < 1e-6
-                ch2_silent = np.max(np.abs(channel_2_data)) < 1e-6
-                
-                # if ch1_silent and ch2_silent:
-                #     print("Both channels are SILENT")
-                # elif max_diff < 1e-10:
-                #     print("Channels are bit-perfect identical")
-                # else:
-                #     print(f"Channel diff - Max: {max_diff:.10f}, Mean: {mean_diff:.10f}")
-                    
-                #     # Additional debug for large differences
-                #     if max_diff > 0.1:
-                #         print(f"  ⚠️  Large difference detected!")
-                #         print(f"  Ch1 range: [{np.min(channel_1_data):.3f}, {np.max(channel_1_data):.3f}]")
-                #         print(f"  Ch2 range: [{np.min(channel_2_data):.3f}, {np.max(channel_2_data):.3f}]")
-            else:
-                print(f"Channel length mismatch: {len(channel_1_data)} vs {len(channel_2_data)}")
-        
-        # Call the debug function
-        debug_channel_data(channel_1_data, channel_2_data)
-        
         # Store latest channel data
         self.latest_channel_data['channel_1'] = channel_1_data
         self.latest_channel_data['channel_2'] = channel_2_data
@@ -893,7 +866,6 @@ def print_spectral_loss(loss_data):
     else:
         # Just print the loss value inline (will be overwritten by monitoring)
         pass
-
 
 def debug_spectral_loss(loss_data):
     """Debug function to show detailed loss computation."""
