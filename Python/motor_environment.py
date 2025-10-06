@@ -15,15 +15,16 @@ logger = logging.getLogger(__name__)
 class SoftLimitHandler:
     """Soft penalty zones using existing max_ccw_steps and max_cw_steps."""
     
-    def __init__(self, max_ccw_steps, max_cw_steps, num_motors=8):
+    def __init__(self, max_ccw_steps, max_cw_steps, num_motors=8, 
+                 danger_zone_ratio=0.1, critical_zone_ratio=0.02):
         self.max_ccw_steps = max_ccw_steps  # List from config
         self.max_cw_steps = max_cw_steps    # List from config
         self.num_motors = num_motors
         
         # Soft boundary zones (percentage from limits)
-        self.danger_zone_ratio = 0.1   # Start penalties at 20% from limit
-        self.critical_zone_ratio = 0.02 # Severe penalties at 5% from limit
-        
+        self.danger_zone_ratio = danger_zone_ratio   # Start penalties at 20% from limit
+        self.critical_zone_ratio = critical_zone_ratio # Severe penalties at 5% from limit
+     
     def get_limit_penalty(self, motor_idx, position):
         """
         Calculate smooth penalty that increases exponentially near limits.
@@ -92,7 +93,44 @@ class MotorEnvironment(gym.Env):
                 limit_penalty=5.0,
                 adaptive_hold_bias=1.0,
                 manual_calibration=True,
-                reset_calibration=0): 
+                reset_calibration=0,
+                target_loss=15.0,
+                initial_movement_penalty=1.0,
+                final_movement_penalty=0.1,
+                penalty_decay_episodes=50,
+                danger_zone_ratio=0.1,
+                critical_zone_ratio=0.02,
+                ccw_safety_margin=200,
+                stagnation_threshold=0.5,
+                stagnation_window=20,
+                motor_completion_timeout=30.0,
+                stabilization_time=2.0,
+                loss_clip_max=50.0,
+                use_improvement_bonus=True,
+                use_consistency_bonus=False,
+                use_breakthrough_bonus=True,
+                use_movement_penalty=False,
+                use_stagnation_penalty=False,
+                use_efficiency_bonus=False,
+                use_proximity_bonus=False,
+                improvement_bonus_weight=1.0,
+                consistency_bonus_weight=5.0,
+                breakthrough_bonus_weight=10.0,
+                movement_penalty_weight=1.0,
+                efficiency_bonus_weight=0.5,
+                proximity_threshold_close=0.5,
+                proximity_threshold_very_close=0.1,
+                proximity_bonus_close=10.0,
+                proximity_bonus_very_close=50.0,
+                episode_steps_before_breakthrough=30,
+                motors_for_movement_penalty=2,
+                observation_space_loss_max=100.0,
+                observation_space_loss_min=0.0,
+                use_early_stopping=True,              
+                use_truncation=True,                
+                min_episode_steps=1,                
+                reward_threshold_for_early_stop=None, 
+                log_motor_details=False):       
         """
         Initialize the motor environment.
         
@@ -141,11 +179,11 @@ class MotorEnvironment(gym.Env):
         # Actions: 3 discrete choices per motor
         self.action_space = spaces.MultiDiscrete([3] * num_motors)
         
-        # Observation: Single loss value from MSSL and direction of loss (-1, 0, or 1)
+        # Update observation space with config
         self.observation_space = spaces.Box(
-            low=np.array([0.0, -1.0], dtype=np.float32),   # [loss_min, direction_min]
-            high=np.array([100.0, 1.0], dtype=np.float32), # [loss_max, direction_max]
-            shape=(2,),                  
+            low=np.array([observation_space_loss_min, -1.0], dtype=np.float32),
+            high=np.array([observation_space_loss_max, 1.0], dtype=np.float32),
+            shape=(2,),
             dtype=np.float32
         )
         
@@ -176,11 +214,61 @@ class MotorEnvironment(gym.Env):
         self.limit_penalty = limit_penalty
         self.limit_violations = np.zeros(num_motors, dtype=int)
 
+        self.target_loss = target_loss
+        self.initial_movement_penalty = initial_movement_penalty
+        self.final_movement_penalty = final_movement_penalty
+        self.penalty_decay_episodes = penalty_decay_episodes
+        self.stagnation_threshold = stagnation_threshold
+        self.stagnation_window = stagnation_window
+        self.motor_completion_timeout = motor_completion_timeout
+        self.stabilization_time = stabilization_time
+        self.ccw_safety_margin = ccw_safety_margin
+
+        # Store reward function config
+        self.use_improvement_bonus = use_improvement_bonus
+        self.use_consistency_bonus = use_consistency_bonus
+        self.use_breakthrough_bonus = use_breakthrough_bonus
+        self.use_movement_penalty = use_movement_penalty
+        self.use_stagnation_penalty = use_stagnation_penalty
+        self.use_efficiency_bonus = use_efficiency_bonus
+        self.use_proximity_bonus = use_proximity_bonus
+        
+        self.improvement_bonus_weight = improvement_bonus_weight
+        self.consistency_bonus_weight = consistency_bonus_weight
+        self.breakthrough_bonus_weight = breakthrough_bonus_weight
+        self.movement_penalty_weight = movement_penalty_weight
+        self.efficiency_bonus_weight = efficiency_bonus_weight
+        
+        self.proximity_threshold_close = proximity_threshold_close
+        self.proximity_threshold_very_close = proximity_threshold_very_close
+        self.proximity_bonus_close = proximity_bonus_close
+        self.proximity_bonus_very_close = proximity_bonus_very_close
+        
+        self.episode_steps_before_breakthrough = episode_steps_before_breakthrough
+        self.motors_for_movement_penalty = motors_for_movement_penalty
+
+        self.use_early_stopping = use_early_stopping
+        self.use_truncation = use_truncation
+        self.min_episode_steps = min_episode_steps
+        self.reward_threshold_for_early_stop = reward_threshold_for_early_stop
+        self.log_motor_details = log_motor_details
+
         self.limit_handler = SoftLimitHandler(
             self.max_ccw_steps, 
             self.max_cw_steps, 
-            self.num_motors
+            self.num_motors,
+            danger_zone_ratio=danger_zone_ratio,
+            critical_zone_ratio=critical_zone_ratio
         )
+
+        if self.use_motors and self.motor_controller:
+            logger.info("Enabling motor drivers...")
+            try:
+                self.motor_controller.send_command(0, "ENABLE", 1)
+                time.sleep(0.5)
+                logger.info("All motor drivers enabled and ready")
+            except Exception as e:
+                logger.error(f"Failed to enable motors: {e}")
         
         logger.info(f"MotorEnvironment initialized with {num_motors} motors")
         logger.info(f"Action space: {self.action_space}")
@@ -300,7 +388,11 @@ class MotorEnvironment(gym.Env):
             logger.debug(f"Started CW homing for motor {motor_num}")
 
         # Wait for all motors
-        completion_info = self._wait_for_motors_completion(motors_moving, movement_commands, timeout=60.0)
+        completion_info = self._wait_for_motors_completion(
+            motors_moving, movement_commands, 
+            timeout=self.motor_completion_timeout,
+            stabilization_time=self.stabilization_time
+        )
         time.sleep(1.0)
 
         # Phase 2: Center from CW limits - all motors together
@@ -335,10 +427,7 @@ class MotorEnvironment(gym.Env):
         logger.info("Motors homed successfully")
     
     def step(self, actions):
-        """
-        Simplified step function that blocks movement entirely when at limits.
-        Either move full amount or don't move at all.
-        """
+
         self.episode_steps += 1
         
         if len(actions) != self.num_motors:
@@ -432,8 +521,22 @@ class MotorEnvironment(gym.Env):
         # reward -= total_limit_penalty
         
         # Check termination
-        terminated = current_loss < self.early_stopping_threshold
-        truncated = self.steps_without_improvement >= self.max_steps_without_improvement
+        terminated = False
+        if self.use_early_stopping and current_loss < self.early_stopping_threshold:
+            terminated = True
+            logger.info(f"Early stopping: loss {current_loss:.4f} < threshold {self.early_stopping_threshold}")
+        
+        # Check reward threshold if configured
+        if self.reward_threshold_for_early_stop is not None:
+            if reward >= self.reward_threshold_for_early_stop:
+                terminated = True
+                logger.info(f"Early stopping: reward {reward:.2f} >= threshold {self.reward_threshold_for_early_stop}")
+        
+        # Check truncation with config
+        truncated = False
+        if self.use_truncation and self.episode_steps >= self.min_episode_steps:
+            if self.steps_without_improvement >= self.max_steps_without_improvement:
+                truncated = True
         
         # Update tracking
         self.previous_loss = current_loss
@@ -686,27 +789,46 @@ class MotorEnvironment(gym.Env):
     
     def _calculate_sophisticated_reward(self, current_loss, motors_moving_count=0):
         """
-        Calculate reward with all components including stagnation penalty.
+        Calculate reward with configurable components.
         
         Args:
             current_loss: Current spectral loss value
             motors_moving_count: Number of motors moving this step
             
         Returns:
-            reward: Calculated reward with all components
+            reward: Calculated reward with enabled components
         """
+
         reward_scale = self.reward_scale
         
         # 1. Base reward (exponential shaping)
         # base_reward = -np.log(current_loss + 1.0)
-        target_loss = 15.0  # This is the observed mean loss over several training episodes. This is our baseline from which we want to improve
         # base_reward = (expected_loss - current_loss) * 2.0
-        base_reward = target_loss - current_loss
-        
-        # 2. Improvement bonus with momentum consideration
+        base_reward = self.target_loss - current_loss
+         
+        # 2. Improvement bonus
         improvement_bonus = 0
+        if self.use_improvement_bonus and self.previous_loss is not None:
+            improvement = self.previous_loss - current_loss
+            self.improvement_history.append(improvement)
+            improvement_bonus = improvement * self.improvement_bonus_weight
+        
+        # 3. Consistency bonus
         consistency_bonus = 0
+        if self.use_consistency_bonus and len(self.improvement_history) > 0:
+            avg_improvement = np.mean(list(self.improvement_history))
+            if avg_improvement > 0 and improvement_bonus > 0:
+                consistency_bonus = min(avg_improvement * self.consistency_bonus_weight, 1.0)
+        
+        # 4. Breakthrough bonus
         breakthrough_bonus = 0
+        if self.use_breakthrough_bonus and self.episode_steps > self.episode_steps_before_breakthrough:
+            if current_loss < self.best_loss:
+                breakthrough_bonus = self.breakthrough_bonus_weight * (self.best_loss - current_loss)
+                if np.isfinite(breakthrough_bonus):
+                    logger.info(f"BREAKTHROUGH! New best loss: {current_loss:.4f} (bonus: {breakthrough_bonus:.2f})")
+                else:
+                    breakthrough_bonus = 0.0
 
         if self.episode_steps > 30:
             if current_loss < self.best_loss:
@@ -733,65 +855,72 @@ class MotorEnvironment(gym.Env):
             if avg_improvement > 0 and improvement > 0:
                 consistency_bonus = min(avg_improvement * 5.0, 1.0)
         
-        # 3. Adaptive movement penalty (decreases over training)
-        current_penalty_strength = self._get_adaptive_movement_penalty()
+        # 5. Movement penalty
         movement_penalty = 0
-        if motors_moving_count > 2:  # Only penalize if more than 2 motors move
-            excess_movements = motors_moving_count - 2
-            movement_penalty = -current_penalty_strength * excess_movements
+        if self.use_movement_penalty and motors_moving_count > self.motors_for_movement_penalty:
+            current_penalty_strength = self._get_adaptive_movement_penalty()
+            excess_movements = motors_moving_count - self.motors_for_movement_penalty
+            movement_penalty = -current_penalty_strength * excess_movements * self.movement_penalty_weight
         
-        # 4. STAGNATION PENALTY (explicitly shown here!)
+        # 6. Stagnation penalty
         stagnation_penalty = 0
-        if len(self.loss_history) > 10:
+        if self.use_stagnation_penalty and len(self.loss_history) > 10:
             recent_std = np.std(list(self.loss_history)[-10:])
-            if recent_std < 1e-4:  # Very little change in recent loss values
-                stagnation_penalty = -0.5  # Penalty for being stuck
+            if recent_std < 1e-4:
+                stagnation_penalty = -0.5
         
-        # 5. Efficiency bonus (reward improvement with fewer motors)
+        # 7. Efficiency bonus
         efficiency_bonus = 0
-        if improvement_bonus > 0:  # Only if there was actual improvement
+        if self.use_efficiency_bonus and improvement_bonus > 0:
             if motors_moving_count == 1:
-                efficiency_bonus = 0.5 * current_penalty_strength  # Single motor success
+                efficiency_bonus = self.efficiency_bonus_weight * self.efficiency_bonus_weight
             elif motors_moving_count == 2:
-                efficiency_bonus = 0.3 * current_penalty_strength  # Two motor success
+                efficiency_bonus = 0.3 * self.efficiency_bonus_weight
         
-        # 6. Proximity bonus (extra reward when very close to target)
+        # 8. Proximity bonus
         proximity_bonus = 0
-        if current_loss < 0.1:  # Very close
-            proximity_bonus = (0.1 - current_loss) * 50.0
-        elif current_loss < 0.5:  # Getting close
-            proximity_bonus = (0.5 - current_loss) * 10.0
+        if self.use_proximity_bonus:
+            if current_loss < self.proximity_threshold_very_close:
+                proximity_bonus = (self.proximity_threshold_very_close - current_loss) * self.proximity_bonus_very_close
+            elif current_loss < self.proximity_threshold_close:
+                proximity_bonus = (self.proximity_threshold_close - current_loss) * self.proximity_bonus_close
         
-        # FINAL REWARD CALCULATION - ALL COMPONENTS INCLUDED
-        # reward = (
-        #     base_reward +           # Base reward
-        #     improvement_bonus +     # Reward for improvement
-        #     consistency_bonus +     # Reward for consistent improvement
-        #     movement_penalty +      # Penalty for excessive movement (adaptive)
-        #     stagnation_penalty +    # PENALTY FOR STAGNATION (HERE!)
-        #     efficiency_bonus +      # Bonus for efficient movement
-        #     proximity_bonus         # Bonus for being close to target
-        # ) * reward_scale
-
+        # FINAL REWARD CALCULATION - sum enabled components
         reward = (
             base_reward +
             improvement_bonus +
-            breakthrough_bonus
+            consistency_bonus +
+            breakthrough_bonus +
+            movement_penalty +
+            stagnation_penalty +
+            efficiency_bonus +
+            proximity_bonus
         )
 
         reward = np.clip(reward, -50, +100)
         
-        # Log detailed breakdown occasionally
-        if np.random.random() < 0.02:  # 2% of the time
-            logger.debug(f"Reward breakdown (ep {self.current_episode}): "
-                        f"loss={current_loss:.4f}, motors={motors_moving_count}, "
-                        f"penalty_strength={current_penalty_strength:.3f}")
-            logger.debug(f"  base={base_reward:.3f}, improve={improvement_bonus:.3f}, "
-                        f"consist={consistency_bonus:.3f}")
-            logger.debug(f"  movement_penalty={movement_penalty:.3f}, "
-                        f"STAGNATION_PENALTY={stagnation_penalty:.3f}")
-            logger.debug(f"  efficiency={efficiency_bonus:.3f}, "
-                        f"proximity={proximity_bonus:.3f}, TOTAL={reward:.3f}")
+        # Log detailed breakdown occasionally (only if components are enabled)
+        if np.random.random() < 0.02:
+            components = [f"base={base_reward:.2f}"]
+            if self.use_improvement_bonus and improvement_bonus != 0:
+                components.append(f"improve={improvement_bonus:.2f}")
+            if self.use_consistency_bonus and consistency_bonus != 0:
+                components.append(f"consist={consistency_bonus:.2f}")
+            if self.use_breakthrough_bonus and breakthrough_bonus != 0:
+                components.append(f"breakthrough={breakthrough_bonus:.2f}")
+            if self.use_movement_penalty and movement_penalty != 0:
+                components.append(f"movement={movement_penalty:.2f}")
+            if self.use_stagnation_penalty and stagnation_penalty != 0:
+                components.append(f"stagnation={stagnation_penalty:.2f}")
+            if self.use_efficiency_bonus and efficiency_bonus != 0:
+                components.append(f"efficiency={efficiency_bonus:.2f}")
+            if self.use_proximity_bonus and proximity_bonus != 0:
+                components.append(f"proximity={proximity_bonus:.2f}")
+            if self.log_motor_details and motors_moving:
+                logger.debug(f"Motor movements: {movement_commands}")
+                logger.debug(f"Motor positions after: {self.motor_positions}")
+            
+            logger.debug(f"Reward (ep {self.current_episode}): {' + '.join(components)} = {reward:.2f}")
         
         return reward
     
@@ -813,20 +942,32 @@ class MotorEnvironment(gym.Env):
                 print(f"Motor {i+1}: {pos:6.0f} {bar:<20}")
     
     def close(self):
-        """Clean up resources."""
+        """Clean up resources and disable motor drivers."""
         if self.use_motors and self.motor_controller:
-            logger.info("Shutting down motors")
-            # Stop all motors
-            self.motor_controller.stop_motor(0)
-            time.sleep(0.5)
+            logger.info("Emergency stop: disabling all motors")
             
-            # Individual stops for safety
+            # Send stop commands
+            self.motor_controller.stop_motor(0)
+            time.sleep(0.2)
+            
+            # Disable all motor drivers (cuts power)
+            try:
+                self.motor_controller.send_command(0, "DISABLE", 1)
+                logger.info("Sent DISABLE command to all motors")
+                time.sleep(1.0)  # Wait for disable to take effect
+            except Exception as e:
+                logger.error(f"Failed to disable motors: {e}")
+            
+            # Individual stops as backup
             for motor_num in range(1, self.num_motors + 1):
                 self.motor_controller.stop_motor(motor_num)
                 time.sleep(0.05)
             
-            # Disconnect
+            # Final wait before disconnect
+            time.sleep(1.0)
+            
             self.motor_controller.disconnect()
+            logger.info("Motors disabled and disconnected")
     
     def get_action_distribution_stats(self) -> Dict:
         """Get statistics about action distribution."""
