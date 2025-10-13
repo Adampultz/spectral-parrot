@@ -25,6 +25,7 @@ class SimpleLossProcessor:
         """
         self.spectral_loss_calculator = spectral_loss_calculator
         self.device = device
+        self.paused = False
         self.step_wait_time = step_wait_time
         self.loss_clip_max = loss_clip_max
         self.averaging_window_factor = averaging_window_factor
@@ -57,6 +58,16 @@ class SimpleLossProcessor:
         logger.info(f"  Averaging window: {self.averaging_window_seconds}s")
         logger.info(f"  Averaging over last {self.averaging_entries} entries")
         logger.info(f"  Buffer size: {buffer_size}")
+
+    def pause(self):
+        """Pause loss processing (e.g., during motor calibration)."""
+        self.paused = True
+        logger.info("Loss processor PAUSED - weak signal warnings suppressed")
+
+    def unpause(self):
+        """Resume loss processing after pause."""
+        self.paused = False
+        logger.info("Loss processor RESUMED - monitoring active")
 
     def clip_outlier_loss(self, current_loss, min_threshold=0.0, max_threshold=50.0):
         """Clip losses to absolute thresholds"""
@@ -111,6 +122,10 @@ class SimpleLossProcessor:
         Args:
             loss_data: Dictionary with 'total_loss' and other loss information
         """
+
+        if self.paused:
+                return
+
         if loss_data and 'total_loss' in loss_data:
             raw_loss = float(loss_data['total_loss'])
         
