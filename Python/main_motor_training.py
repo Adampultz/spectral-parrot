@@ -1,5 +1,5 @@
 # Enhanced main_motor_training.py with checkpoint resume functionality
-
+from __future__ import annotations
 import logging
 import sys
 import time
@@ -9,14 +9,14 @@ import matplotlib.pyplot as plt
 import os
 import signal
 import json
-import pickle
+# import pickle
+import gc
 from dataclasses import dataclass, asdict, field
 from typing import Optional, List, Dict, Any
 from pythonosc import udp_client
 from datetime import datetime
 from collections import deque
 from config import TrainingConfig
-import gc
 
 # Setup logging
 logging.basicConfig(
@@ -56,80 +56,69 @@ def signal_handler(sig, frame):
             logger.error(f"Error during OSC cleanup: {e}")
     sys.exit(0)
 
-# # Training configuration
-# @dataclass
-# class TrainingConfig:
-#     # Environment
-#     num_motors: int = 8
-#     early_stopping_threshold: float = 10
-#     max_steps_without_improvement: int = 300
+def setup_session_logging(config: TrainingConfig, training_state: TrainingState, resumed: bool = False) -> str:
+    """
+    Set up logging for this training session with a unique log file.
     
-#     # Motor control
-#     use_motors: bool = True
-#     manual_calibration: bool = False # If True, you will need to manually trigger the motor homing sequence during resets
-#     motor_speed: int = 200
-#     motor_reset_speed: int = 200
-#     motor_steps: int = 50
-#     step_wait_time: float = 1.0
-#     reset_wait_time: float = 0.3
-#     max_ccw_steps: List[int] = field(default_factory=lambda: [4000, 4000, 4000, 4000, 5000, 5000, 5000, 5000])
-#     max_cw_steps: List[int] = field(default_factory=lambda: [4500, 4500, 4500, 4500, 4500, 4500, 4500, 4500])
-#     limit_penalty: float = 0.0
-#     reset_calibration: int = 1  # 0: calibrate to center, 1: random calibration, 2: skip calibration
-
+    Args:
+        config: Training configuration
+        training_state: Current training state (for episode number)
+        resumed: Whether this is a resumed session
+        
+    Returns:
+        str: Path to the log file for this session
+    """
+    # Create logs directory structure
+    experiment_log_dir = os.path.join(config.log_dir, config.experiment_name)
+    os.makedirs(experiment_log_dir, exist_ok=True)
     
-#     # Serial ports
-#     port1: str = "/dev/cu.usbserial-0001"
-#     port2: str = "/dev/cu.usbserial-1"
-#     baudrate: int = 115200
+    # Generate timestamp
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     
-#     # Audio
-#     input_device: Optional[int] = None
-#     sample_rate: int = 48000
-#     channels: int = 2
-#     buffer_size: int = 1024
+    # Generate log filename
+    suffix = "_resumed" if resumed else ""
+    log_filename = f"{timestamp}_ep{training_state.episode}{suffix}.log"
+    session_log_path = os.path.join(experiment_log_dir, log_filename)
     
-#     # PPO hyperparameters
-#     total_timesteps: int = 100000
-#     max_ep_length: int = 1024
-#     update_interval: int = 64
-#     batch_size: int = 32
-#     n_epochs: int = 10
+    # Remove existing handlers to reconfigure
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
     
-#     # Learning rates
-#     lr_actor: float = 5e-4
-#     lr_critic: float = 1e-5
+    # Create new handlers
+    handlers = [
+        logging.StreamHandler(sys.stdout),  # Console output
+        logging.FileHandler(session_log_path, mode='w')  # Session-specific log
+    ]
     
-#     # PPO specific
-#     gamma: float = 0.995
-#     gae_lambda: float = 0.95
-#     clip_param: float = 0.2
-#     entropy_coef: float = 0.01
+    # Optionally add master log handler
+    if config.log_to_master:
+        master_log_path = os.path.join(config.log_dir, "master.log")
+        handlers.append(logging.FileHandler(master_log_path, mode='a'))
     
-#     # Network
-#     hidden_size: int = 64
-#     hold_bias: float = 2.0
+    # Configure logging
+    logging.basicConfig(
+        level=getattr(logging, config.log_level.upper(), logging.INFO),
+        format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
+        handlers=handlers,
+        force=True  # Force reconfiguration
+    )
     
-#     # Reward
-#     reward_scale: float = 1.0
+    # Log session start information
+    logger.info("="*80)
+    logger.info(f"NEW TRAINING SESSION: {config.experiment_name}")
+    logger.info(f"Log file: {session_log_path}")
+    logger.info(f"Timestamp: {timestamp}")
+    logger.info(f"Starting episode: {training_state.episode}")
+    if resumed:
+        logger.info("This is a RESUMED session")
+    if config.experiment_tags:
+        logger.info(f"Tags: {', '.join(config.experiment_tags)}")
+    if config.experiment_notes:
+        logger.info(f"Notes: {config.experiment_notes}")
+    logger.info("="*80)
     
-#     # Saving
-#     save_interval: int = 1
-#     plot_frequency: int = 1
-#     log_frequency: int = 1
-#     checkpoint_dir: str = "./checkpoints"
-#     results_dir: str = "./results"
-    
-#     def to_dict(self):
-#         """Convert config to dictionary for saving."""
-#         return asdict(self)
-    
-#     @classmethod
-#     def from_dict(cls, config_dict):
-#         """Create config from dictionary."""
-#         return cls(**config_dict)
-
-
+    return session_log_path
 class TrainingState:
     """Class to manage training state for checkpointing."""
     
@@ -205,7 +194,13 @@ def save_checkpoint(agent: MotorPPOAgent,
         'timestamp': datetime.now().isoformat(),
         'is_best': is_best,
         'pytorch_version': torch.__version__,
-        'checkpoint_version': '1.0'
+        'checkpoint_version': '1.0',
+
+        # Experiment metadata
+        'experiment_name': config.experiment_name,
+        'experiment_tags': config.experiment_tags,
+        'experiment_notes': config.experiment_notes,
+        'random_seed': config.random_seed,
     }
     
     # Save checkpoint
@@ -328,6 +323,27 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     """
     global env, osc_handler
 
+    # Set random seed for reproducibility
+    if config.random_seed is not None:
+        import random
+        random.seed(config.random_seed)
+        np.random.seed(config.random_seed)
+        torch.manual_seed(config.random_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(config.random_seed)
+        logger.info(f"Random seed set to {config.random_seed}")
+    
+    # Set logging level
+    log_level = getattr(logging, config.log_level.upper(), logging.INFO)
+    logging.getLogger().setLevel(log_level)
+    
+    # Print experiment info
+    logger.info(f"Experiment: {config.experiment_name}")
+    if config.experiment_tags:
+        logger.info(f"Tags: {', '.join(config.experiment_tags)}")
+    if config.experiment_notes:
+        logger.info(f"Notes: {config.experiment_notes}")
+
     config.print_summary()
 
     log_level = getattr(logging, config.log_level.upper(), logging.INFO)
@@ -343,6 +359,7 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     # Initialize training state
     training_state = TrainingState(max_history=config.history_maxlen)
     agent = None
+    resumed = False
     
     # Resume from checkpoint if specified
     if resume_from:
@@ -369,6 +386,9 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         else:
             logger.warning(f"Checkpoint not found: {resume_from}")
     
+    session_log_path = setup_session_logging(config, training_state, resumed=resumed)
+    logger.info(f"Session log: {session_log_path}")
+    
     # 1. Setup audio system
     logger.info("Setting up audio system...")
     audio = EnhancedAudio(
@@ -376,7 +396,15 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         channels=config.channels,
         buffer_size=config.buffer_size,
         input_device=config.input_device,
-        enable_spectral_loss=True
+        enable_spectral_loss=True,
+        stft_scales=config.stft_scales,        
+        stft_window_type=config.stft_window_type,  
+        use_pyfftw=config.use_pyfftw,          
+        fft_threads=config.fft_threads,
+        use_normalized_loss=config.use_normalized_loss,
+        min_signal_threshold=config.min_signal_threshold,
+        weak_signal_penalty=config.weak_signal_penalty,
+        normalization_method=config.normalization_method        
     )
     
     # 2. Create loss processor
@@ -391,22 +419,6 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     )
 
     osc_handler = OSCHandler()
-
-    # Start audio
-    logger.info("Starting audio system...")
-    audio.start()
-    
-    # Wait for loss processor to be ready
-    logger.info("Waiting for loss processor...")
-    start_time = time.time()
-    while not loss_processor.is_ready() and time.time() - start_time < 15:
-        time.sleep(0.5)
-    
-    if not loss_processor.is_ready():
-        logger.error("Loss processor not ready after timeout")
-        return
-    
-    logger.info("Loss processor ready!")
     
     # 3. Setup motor controller
     motor_controller = None
@@ -418,10 +430,6 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         if not motor_controller.connect():
             logger.warning("Failed to connect to motors, continuing without motor control")
             config.use_motors = False
-    
-    # Start OSC server
-    logger.info("Starting OSC server")
-    osc_handler.start()
     
     # 4. Create environment
     logger.info("Creating motor environment...")
@@ -435,7 +443,6 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         max_steps_without_improvement=config.max_steps_without_improvement,
         use_motors=config.use_motors,
         motor_speed=config.motor_speed,
-        motor_reset_speed=config.motor_reset_speed,
         motor_steps=config.motor_steps,
         reward_scale=config.reward_scale,
         max_ccw_steps=config.max_ccw_steps,
@@ -455,7 +462,6 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         stagnation_window=config.stagnation_window,
         motor_completion_timeout=config.motor_completion_timeout,
         stabilization_time=config.stabilization_time,
-        loss_clip_max=config.loss_clip_max,
         use_improvement_bonus=config.use_improvement_bonus,
         use_consistency_bonus=config.use_consistency_bonus,
         use_breakthrough_bonus=config.use_breakthrough_bonus,
@@ -478,9 +484,17 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         observation_space_loss_min=config.observation_space_loss_min,
         use_early_stopping=config.use_early_stopping,      
         use_truncation=config.use_truncation,               
-        min_episode_steps=config.min_episode_steps,         
+        min_episode_steps=config.min_episode_steps,    
+        max_ep_length=config.max_ep_length,
         reward_threshold_for_early_stop=config.reward_threshold_for_early_stop,  
-        log_motor_details=config.log_motor_details          
+        log_motor_details=config.log_motor_details,
+        stallguard_threshold=config.stallguard_threshold,
+        stallguard_warnings_before_stop=config.stallguard_warnings_before_stop,
+        use_per_motor_stallguard=config.use_per_motor_stallguard,
+        per_motor_stallguard=config.per_motor_stallguard,
+        motor_acceleration=config.motor_acceleration,
+        motor_current_ma=config.motor_current_ma,
+        enable_stallguard=config.enable_stallguard          
     )
 
     # Create signal handlers
@@ -510,8 +524,33 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             value_coef=config.value_coef,               
             normalize_advantages=config.normalize_advantages, 
             normalize_returns=config.normalize_returns,       
-            use_gae=config.use_gae 
+            use_gae=config.use_gae,
+            actor_hidden_layers=config.actor_hidden_layers,      
+            critic_hidden_layers=config.critic_hidden_layers,   
+            use_layernorm=config.use_layernorm,                 
+            dropout_rate=config.dropout_rate,                  
+            activation=config.activation_function            
         )
+
+    # Start OSC server
+    logger.info("Starting OSC server")
+    osc_handler.start()
+    
+    # Start audio
+    logger.info("Starting audio system...")
+    audio.start()
+    
+    # Wait for loss processor to be ready
+    logger.info("Waiting for loss processor...")
+    start_time = time.time()
+    while not loss_processor.is_ready() and time.time() - start_time < 15:
+        time.sleep(0.5)
+    
+    if not loss_processor.is_ready():
+        logger.error("Loss processor not ready after timeout")
+        return
+    
+    logger.info("Loss processor ready!")
     
     # 6. Training loop (continuing from checkpoint if loaded)
     logger.info(f"Starting/Resuming training from episode {training_state.episode + 1}...")
@@ -626,7 +665,7 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
                 logger.info(f"New best model! Avg reward: {training_state.best_reward:.2f}")
         
         # Plot progress
-        if training_state.episode % 20 == 0:
+        if training_state.episode % config.plot_save_frequency == 0:
             plot_training_progress(
                 training_state.episode_rewards,
                 training_state.episode_losses,
@@ -714,7 +753,7 @@ def plot_training_progress(rewards, losses, lengths, save_path, config):
     
     if config.save_plots:
         plt.savefig(save_path, dpi=config.plot_dpi)
-        logger.debug(f"Plot saved to {save_path}")
+        logger.info(f"✓ Plot saved to {save_path}")
     
     plt.close()
 
