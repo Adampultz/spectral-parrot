@@ -61,7 +61,12 @@ class MotorPPOAgent:
                  min_temperature=0.3, 
                  normalize_advantages=True,   
                  normalize_returns=False,         
-                 use_gae=True):
+                 use_gae=True, actor_hidden_layers=[64, 64],     # ADD
+                 critic_hidden_layers=[64, 64],    # ADD
+                 use_layernorm=True,               # ADD
+                 dropout_rate=0.1,                 # ADD
+                 activation='relu'):
+        
         """Initialize the motor PPO agent."""
         self.device = device
         self.gamma = gamma
@@ -81,18 +86,34 @@ class MotorPPOAgent:
         from motor_actor_network import MotorActorNetwork
         
         # Initialize networks
-        self.actor = MotorActorNetwork(state_dim, num_motors, hidden_size, hold_bias=hold_bias).to(device)
-        
-        # Critic can be simpler too
-        self.critic = nn.Sequential(
-            nn.Linear(state_dim, hidden_size),
-            nn.LayerNorm(hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.LayerNorm(hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, 1)
+        self.actor = MotorActorNetwork(
+            state_dim, 
+            num_motors, 
+            hidden_layers=actor_hidden_layers,
+            use_layernorm=use_layernorm,
+            dropout_rate=dropout_rate,
+            hold_bias=hold_bias,
+            activation=activation
         ).to(device)
+
+        # Build critic from layer sizes
+        critic_layers = []
+        in_features = state_dim
+        
+        for hidden_size in critic_hidden_layers:
+            critic_layers.append(nn.Linear(in_features, hidden_size))
+            if use_layernorm:
+                critic_layers.append(nn.LayerNorm(hidden_size))
+            if activation == 'relu':
+                critic_layers.append(nn.ReLU())
+            elif activation == 'tanh':
+                critic_layers.append(nn.Tanh())
+            else:
+                critic_layers.append(nn.ReLU())
+            in_features = hidden_size
+        
+        critic_layers.append(nn.Linear(in_features, 1))
+        self.critic = nn.Sequential(*critic_layers).to(device)
         
         # Initialize optimizers
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr_actor)
