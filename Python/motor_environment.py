@@ -82,9 +82,9 @@ class MotorEnvironment(gym.Env):
                 reward_scale=1.0,
                 early_stopping_threshold=0.02,
                 max_steps_without_improvement=100,
+                max_ep_length=1024,
                 use_motors=True,
                 motor_speed=200,
-                motor_reset_speed=200,
                 motor_steps=100,
                 max_ccw_steps: List[int] = None,
                 max_cw_steps: List[int] = None,
@@ -105,7 +105,6 @@ class MotorEnvironment(gym.Env):
                 stagnation_window=20,
                 motor_completion_timeout=30.0,
                 stabilization_time=2.0,
-                loss_clip_max=50.0,
                 use_improvement_bonus=True,
                 use_consistency_bonus=False,
                 use_breakthrough_bonus=True,
@@ -130,7 +129,14 @@ class MotorEnvironment(gym.Env):
                 use_truncation=True,                
                 min_episode_steps=1,                
                 reward_threshold_for_early_stop=None, 
-                log_motor_details=False):       
+                log_motor_details=False,
+                stallguard_threshold=150,              
+                stallguard_warnings_before_stop=10,    
+                use_per_motor_stallguard=False,        
+                per_motor_stallguard=None,             
+                motor_acceleration=400,                
+                motor_current_ma=1200,                 
+                enable_stallguard=True):                      
         """
         Initialize the motor environment.
         
@@ -144,7 +150,6 @@ class MotorEnvironment(gym.Env):
             max_steps_without_improvement: Steps before truncation
             use_motors: Whether to actually control motors
             motor_speed: Speed for motor movements
-            motor_reset_speed: Speed for reset movements
             motor_steps: Steps per motor movement
         """
         super(MotorEnvironment, self).__init__()
@@ -161,7 +166,6 @@ class MotorEnvironment(gym.Env):
         
         # Motor parameters
         self.motor_speed = motor_speed
-        self.motor_reset_speed = motor_reset_speed
         self.motor_steps = motor_steps
 
         self.adaptive_hold_bias = adaptive_hold_bias
@@ -201,6 +205,7 @@ class MotorEnvironment(gym.Env):
         self.final_movement_penalty = 0.1    # Weak penalty late in training
         self.penalty_decay_episodes = 50     # Episodes to decay penalty over
         self.current_episode = 0
+        self.max_ep_length = max_ep_length
         
         # History tracking for sophisticated reward calculation
         self.improvement_history = deque(maxlen=5)
@@ -269,6 +274,43 @@ class MotorEnvironment(gym.Env):
                 logger.info("All motor drivers enabled and ready")
             except Exception as e:
                 logger.error(f"Failed to enable motors: {e}")
+
+            logger.info("Configuring motor parameters...")
+        
+            try:
+                # Configure physical parameters
+                self.motor_controller.configure_motor_physics(
+                    acceleration=motor_acceleration,
+                    current_ma=motor_current_ma
+                )
+                
+                # Configure StallGuard
+                if enable_stallguard:
+                    if use_per_motor_stallguard and per_motor_stallguard:
+                        # Per-motor thresholds
+                        for motor_num in range(1, self.num_motors + 1):
+                            threshold = per_motor_stallguard[motor_num - 1]
+                            self.motor_controller.configure_motor_per_motor_stallguard(
+                                motor_num, threshold
+                            )
+                        # Set global warning count
+                        self.motor_controller.send_command(0, "SG_WARNINGS", stallguard_warnings_before_stop)
+                    else:
+                        # Global threshold
+                        self.motor_controller.configure_stallguard(
+                            threshold=stallguard_threshold,
+                            warnings_before_stop=stallguard_warnings_before_stop
+                        )
+                else:
+                    logger.warning("StallGuard disabled - no protection against over-tightening!")
+                
+                # Enable drivers
+                self.motor_controller.send_command(0, "ENABLE", 1)
+                time.sleep(0.5)
+                logger.info("Motor configuration complete")
+                
+            except Exception as e:
+                logger.error(f"Failed to configure motors: {e}")
         
         logger.info(f"MotorEnvironment initialized with {num_motors} motors")
         logger.info(f"Action space: {self.action_space}")
@@ -304,10 +346,9 @@ class MotorEnvironment(gym.Env):
             logger.info("Resetting motors to initial positions")
             # Stop all motors first
             self.motor_controller.stop_motor(0)  # 0 = all motors
-            
-            # Set reset speed
-            for motor_num in range(1, self.num_motors + 1):
-                self.motor_controller.set_speed(motor_num, self.motor_reset_speed)
+
+            if self.loss_processor is not None:
+                self.loss_processor.pause()
             
             # Optional: Move motors to home position
             # This depends on your physical setup
@@ -322,6 +363,9 @@ class MotorEnvironment(gym.Env):
                 # No calibration - motors stay at current positions
             else:
                 logger.warning(f"Unknown reset_calibration value: {self.reset_calibration}. Skipping calibration.")
+
+            if self.loss_processor is not None:
+                self.loss_processor.unpause()
 
         # Reset loss processor statistics
         self.loss_processor.reset_stats()
@@ -379,7 +423,7 @@ class MotorEnvironment(gym.Env):
         
         # Start all motors (both ESP32s)
         for motor_num in range(1, self.num_motors + 1):
-            self.motor_controller.set_speed(motor_num, self.motor_reset_speed)
+            self.motor_controller.set_speed(motor_num, self.motor_speed)
             self.motor_controller.set_direction(motor_num, 1)  # 1 = CW
             self.motor_controller.move_steps(motor_num, 30000)
             motors_moving.add(motor_num)
@@ -403,7 +447,7 @@ class MotorEnvironment(gym.Env):
         
         # Start all motors centering
         for motor_num in range(1, self.num_motors + 1):
-            self.motor_controller.set_speed(motor_num, self.motor_reset_speed)
+            self.motor_controller.set_speed(motor_num, self.motor_speed)
             self.motor_controller.set_direction(motor_num, 0)  # 0 = CCW
             self.motor_controller.move_steps(motor_num, center_offset)
             motors_moving.add(motor_num)
@@ -558,6 +602,10 @@ class MotorEnvironment(gym.Env):
             'is_stagnant': self.is_stagnant(),
             'recommended_hold_bias': self.get_recommended_hold_bias()
         }
+
+        if self.episode_steps >= self.max_ep_length:
+            truncated = True
+            logger.info(f"Max episode length reached: {self.episode_steps}")
         
         return observation, reward, terminated, truncated, info
 
@@ -607,9 +655,9 @@ class MotorEnvironment(gym.Env):
         movement_completion_time = None
         stallguard_triggered = {}
         
-        # Track which ESP32 we expect responses from
-        esp1_motors = {m for m in motors_moving if m % 2 == 1}  # Odd motors
-        esp2_motors = {m for m in motors_moving if m % 2 == 0}  # Even motors
+        # # Track which ESP32 we expect responses from
+        # esp1_motors = {m for m in motors_moving if m % 2 == 1}  # Odd motors
+        # esp2_motors = {m for m in motors_moving if m % 2 == 0}  # Even motors
         
         # logger.info(f"ESP32 #1 should report on motors: {sorted(esp1_motors)}")
         # logger.info(f"ESP32 #2 should report on motors: {sorted(esp2_motors)}")
@@ -800,10 +848,7 @@ class MotorEnvironment(gym.Env):
         """
 
         reward_scale = self.reward_scale
-        
-        # 1. Base reward (exponential shaping)
-        # base_reward = -np.log(current_loss + 1.0)
-        # base_reward = (expected_loss - current_loss) * 2.0
+
         base_reward = self.target_loss - current_loss
          
         # 2. Improvement bonus
@@ -829,15 +874,6 @@ class MotorEnvironment(gym.Env):
                     logger.info(f"BREAKTHROUGH! New best loss: {current_loss:.4f} (bonus: {breakthrough_bonus:.2f})")
                 else:
                     breakthrough_bonus = 0.0
-
-        if self.episode_steps > 30:
-            if current_loss < self.best_loss:
-                breakthrough_bonus = 10.0 * (self.best_loss - current_loss)
-                if not np.isfinite(breakthrough_bonus):
-                    logger.warning(f"Invalid breakthrough_bonus: {breakthrough_bonus}")
-                    breakthrough_bonus = 0.0
-                else:
-                    logger.info(f"BREAKTHROUGH! New best loss: {current_loss:.4f} (bonus: {breakthrough_bonus:.2f})")
 
         if self.previous_loss is not None:
             improvement = self.previous_loss - current_loss
@@ -916,9 +952,11 @@ class MotorEnvironment(gym.Env):
                 components.append(f"efficiency={efficiency_bonus:.2f}")
             if self.use_proximity_bonus and proximity_bonus != 0:
                 components.append(f"proximity={proximity_bonus:.2f}")
-            if self.log_motor_details and motors_moving:
-                logger.debug(f"Motor movements: {movement_commands}")
-                logger.debug(f"Motor positions after: {self.motor_positions}")
+            # if self.log_motor_details and motors_moving:
+            #     logger.debug(f"Motor movements: {movement_commands}")
+            #     logger.debug(f"Motor positions after: {self.motor_positions}")
+            if self.log_motor_details and motors_moving_count > 0:
+                logger.debug(f"Reward calculation: {motors_moving_count} motors moved, loss={current_loss:.4f}")
             
             logger.debug(f"Reward (ep {self.current_episode}): {' + '.join(components)} = {reward:.2f}")
         
