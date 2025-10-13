@@ -14,8 +14,8 @@ class MotorActorNetwork(nn.Module):
     Simplified actor network for discrete motor control.
     Each motor has 3 actions: CCW (0), HOLD (1), CW (2)
     """
-    def __init__(self, state_dim, num_motors, hidden_size=64, 
-                 use_layernorm=True, dropout_rate=0.1, hold_bias=0.5):
+    def __init__(self, state_dim, num_motors, hidden_layers=[64, 64], 
+                 use_layernorm=True, dropout_rate=0.1, hold_bias=0.5, activation='relu'):
         """
         Initialize the motor actor network.
         
@@ -31,18 +31,52 @@ class MotorActorNetwork(nn.Module):
         self.num_motors = num_motors
         self.state_dim = state_dim
         self.hold_bias = hold_bias
+
+        # Select activation function
+        if activation == 'relu':
+            self.activation_fn = nn.ReLU()
+        elif activation == 'tanh':
+            self.activation_fn = nn.Tanh()
+        elif activation == 'elu':
+            self.activation_fn = nn.ELU()
+        else:
+            self.activation_fn = nn.ReLU()
+
+        # Build feature extractor from list of layer sizes
+        layers = []
+        in_features = state_dim
         
-        # Simpler architecture for discrete-only control
-        self.feature_extractor = nn.Sequential(
-            nn.Linear(state_dim, hidden_size),
-            nn.LayerNorm(hidden_size) if use_layernorm else nn.Identity(),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_size, hidden_size),
-            nn.LayerNorm(hidden_size) if use_layernorm else nn.Identity(),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate)
-        )
+        for hidden_size in hidden_layers:
+            layers.append(nn.Linear(in_features, hidden_size))
+            if use_layernorm:
+                layers.append(nn.LayerNorm(hidden_size))
+            layers.append(self.activation_fn)
+            layers.append(nn.Dropout(dropout_rate))
+            in_features = hidden_size
+        
+        self.feature_extractor = nn.Sequential(*layers)
+        
+        # # Simpler architecture for discrete-only control
+        # self.feature_extractor = nn.Sequential(
+        #     nn.Linear(state_dim, hidden_size),
+        #     nn.LayerNorm(hidden_size) if use_layernorm else nn.Identity(),
+        #     nn.ReLU(),
+        #     nn.Dropout(dropout_rate),
+        #     nn.Linear(hidden_size, hidden_size),
+        #     nn.LayerNorm(hidden_size) if use_layernorm else nn.Identity(),
+        #     nn.ReLU(),
+        #     nn.Dropout(dropout_rate)
+        # )
+
+        # Action heads (use last hidden size)
+        final_hidden = hidden_layers[-1] if hidden_layers else state_dim
+        self.motor_heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(final_hidden, final_hidden // 2),
+                self.activation_fn,
+                nn.Linear(final_hidden // 2, 3)
+            ) for _ in range(num_motors)
+        ])
         
         # Separate action head for each motor (3 actions each)
         self.motor_heads = nn.ModuleList([
