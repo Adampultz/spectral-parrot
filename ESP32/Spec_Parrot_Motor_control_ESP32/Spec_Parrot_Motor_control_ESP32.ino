@@ -49,8 +49,6 @@
 
               const int varianceSize = 10;
               const int variance_threshold = 1000;
-              // const int accelerationTime = 2000;
-              const int sG_numWarnings = 10;
 
               const float VELOCITY_THRESHOLD = 0.95;  // Consider constant speed if velocity > 95% of max
               const float DECEL_THRESHOLD = 0.90;     // Start decel detection when velocity < 90% of max
@@ -60,6 +58,7 @@
               // Add basic StallGuard variables - only these are new
               uint16_t stallGuardResult[NUM_MOTORS] = {0, 0, 0, 0};
               int sgThreshold = 150;  // Default StallGuard threshold (0-255)
+              int sG_numWarnings = 10;
 
               // Create stepper and driver objects - all using the same SERIAL_PORT but different addresses
               TMC2209Stepper* drivers[NUM_MOTORS];
@@ -790,6 +789,57 @@ void checkStallGuard() {
                                 stallguardInhibit[i] = false;
                             }
                             Serial.println("StallGuard ALLOWED for all motors");
+                        }
+                    }
+                    else if (commandType == "SG_WARNINGS") {
+                        if (motorIndex == NUM_MOTORS) {
+                            // Set for all motors (global setting)
+                            sG_numWarnings = value;
+                            Serial.print("StallGuard warnings set to: ");
+                            Serial.println(value);
+                        } else {
+                            // Currently global only, but you could make per-motor arrays
+                            sG_numWarnings = value;
+                            Serial.print("StallGuard warnings set to: ");
+                            Serial.println(value);
+                        }
+                    }
+                    else if (commandType == "ACCEL") {
+                        // Set acceleration for specific motor or all
+                        if (motorIndex == NUM_MOTORS) {
+                            for (int i = 0; i < NUM_MOTORS; i++) {
+                                accelSpeed[i] = value;
+                                steppers[i].setAccelerationInStepsPerSecondPerSecond(value * mSteps[i]);
+                            }
+                            Serial.print("All motors acceleration set to: ");
+                            Serial.println(value);
+                        } else if (motorIndex >= 0 && motorIndex < NUM_MOTORS) {
+                            accelSpeed[motorIndex] = value;
+                            steppers[motorIndex].setAccelerationInStepsPerSecondPerSecond(value * mSteps[motorIndex]);
+                            Serial.print("Motor ");
+                            Serial.print(motorIndex + 1);
+                            Serial.print(" acceleration set to: ");
+                            Serial.println(value);
+                        }
+                    }
+                    else if (commandType == "CURRENT") {
+                        // Set motor current in mA
+                        if (motorIndex == NUM_MOTORS) {
+                            for (int i = 0; i < NUM_MOTORS; i++) {
+                                mAmps[i] = value;
+                                drivers[i]->rms_current(value);
+                            }
+                            Serial.print("All motors current set to: ");
+                            Serial.print(value);
+                            Serial.println(" mA");
+                        } else if (motorIndex >= 0 && motorIndex < NUM_MOTORS) {
+                            mAmps[motorIndex] = value;
+                            drivers[motorIndex]->rms_current(value);
+                            Serial.print("Motor ");
+                            Serial.print(motorIndex + 1);
+                            Serial.print(" current set to: ");
+                            Serial.print(value);
+                            Serial.println(" mA");
                         }
                     }
 
