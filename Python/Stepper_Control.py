@@ -2,7 +2,9 @@ import serial
 import time
 import argparse
 import threading
+import logging
 
+logger = logging.getLogger(__name__)
 class DualESP32StepperController:
     def __init__(self, port1, port2, baudrate=115200, debug=False, motor_speed=2, motor_steps=100):
         """
@@ -192,6 +194,57 @@ class DualESP32StepperController:
                 self.responses1.clear()
                 self.responses2.clear()
             return responses
+    
+    def configure_stallguard(self, threshold=150, warnings_before_stop=10):
+        """
+        Configure StallGuard parameters for all motors.
+        
+        Args:
+            threshold: StallGuard threshold (0-255, lower = more sensitive)
+            warnings_before_stop: Number of warnings before emergency stop
+        """
+        logger.info(f"Configuring StallGuard: threshold={threshold}, warnings={warnings_before_stop}")
+        
+        # Set threshold for all motors
+        self.send_command(0, "SG", threshold)
+        time.sleep(0.1)
+        
+        # Set warning count
+        self.send_command(0, "SG_WARNINGS", warnings_before_stop)
+        time.sleep(0.1)
+    
+    def configure_motor_per_motor_stallguard(self, motor_num, threshold):
+        """
+        Configure StallGuard threshold for a specific motor.
+        
+        Args:
+            motor_num: Motor number (1-8)
+            threshold: StallGuard threshold (0-255)
+        """
+        logger.info(f"Configuring Motor {motor_num} StallGuard threshold: {threshold}")
+        self.send_command(motor_num, "SG", threshold)
+        time.sleep(0.05)
+    
+    def configure_motor_physics(self, acceleration=400, current_ma=1200, 
+                                enable_spreadcycle=False):
+        """
+        Configure motor physical parameters for all motors.
+        
+        Args:
+            acceleration: Acceleration in steps/s²
+            current_ma: Motor current in mA (RMS)
+            enable_spreadcycle: Use SpreadCycle (True) or StealthChop (False)
+        """
+        logger.info(f"Configuring motor physics: accel={acceleration}, "
+                   f"current={current_ma}mA, spreadcycle={enable_spreadcycle}")
+        
+        # Set acceleration
+        self.send_command(0, "ACCEL", acceleration)
+        time.sleep(0.1)
+        
+        # Set current
+        self.send_command(0, "CURRENT", current_ma)
+        time.sleep(0.1)
     
     def send_command(self, motor_number, command_type, value):
         """
