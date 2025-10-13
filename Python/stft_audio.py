@@ -18,8 +18,6 @@ from scipy import signal
 from collections import deque
 import threading
 import logging
-from concurrent.futures import ThreadPoolExecutor
-import multiprocessing
 
 # Import the original SimpleAudio class
 from main_MSSL import SimpleAudio
@@ -415,7 +413,13 @@ class MultiScaleSpectralLoss:
     def __init__(self, 
                  sample_rate=48000,
                  scales=None,
-                 window_type='hann'):
+                 window_type='hann',
+                 use_pyfftw=True,         
+                 fft_threads=2,
+                 use_normalized_loss=True,             
+                 min_signal_threshold=0.1,              
+                 weak_signal_penalty=50.0,              
+                 normalization_method="l2"):
         """
         Initialize multi-scale spectral loss calculator.
         
@@ -423,9 +427,28 @@ class MultiScaleSpectralLoss:
             sample_rate (int): Audio sample rate
             scales (list): List of STFT window sizes (hop_length = window_size/4)
             window_type (str): Window function type
+            use_pyfftw (bool): Use pyFFTW for faster FFT
+            fft_threads (int): Number of FFT threads
+            use_normalized_loss (bool): Use volume-invariant normalized loss
+            min_signal_threshold (float): Minimum signal level for normalization
+            weak_signal_penalty (float): Penalty when signal is too weak
+            normalization_method (str): "l2" for Frobenius norm, "cosine" for cosine similarity
         """
         self.sample_rate = sample_rate
         self.window_type = window_type
+
+        # Store normalization configuration
+        self.use_normalized_loss = use_normalized_loss
+        self.min_signal_threshold = min_signal_threshold
+        self.weak_signal_penalty = weak_signal_penalty
+        self.normalization_method = normalization_method
+
+        # Log configuration
+        if use_normalized_loss:
+            logger.info(f"Using normalized loss (method: {normalization_method})")
+            logger.info(f"Min signal threshold: {min_signal_threshold}, weak signal penalty: {weak_signal_penalty}")
+        else:
+            logger.info("Using original non-normalized loss")
         
         # Default scales (STFT window sizes)
         if scales is None:
@@ -442,7 +465,9 @@ class MultiScaleSpectralLoss:
                 window_size=window_size,
                 hop_length=hop_length,
                 sample_rate=sample_rate,
-                window_type=window_type
+                window_type=window_type,
+                use_pyfftw=use_pyfftw,     # Pass config
+                fft_threads=fft_threads
             )
             
             # Add callback for this specific processor and scale
@@ -472,15 +497,17 @@ class MultiScaleSpectralLoss:
         
         # Lock for thread safety
         self.lock = threading.Lock()
-
-        self.executor = ThreadPoolExecutor(max_workers=len(self.scales))
         
     def add_loss_callback(self, callback: Callable):
         """Add callback for loss computation results."""
         self.loss_callbacks.append(callback)
-        
-    def process_audio_channels(self, channel_1_data: np.ndarray, channel_2_data: np.ndarray):
-        # Process all scales sequentially - much faster for small buffers!
+
+    def process_audio_channels(self, channel_1_data, channel_2_data):
+        """
+        Process audio data for both channels across all STFT scales.
+        Uses sequential processing - faster than parallel for small audio buffers.
+        """
+        # Process all scales sequentially
         for scale_name, processor in self.stft_processors.items():
             processor.process_channel_data('channel_1', channel_1_data)
             processor.process_channel_data('channel_2', channel_2_data)
@@ -577,32 +604,86 @@ class MultiScaleSpectralLoss:
                 callback(self.current_losses)
             except Exception as e:
                 print(f"Error in loss callback: {e}")
-                
+
     def _compute_single_scale_loss(self, ch1_data, ch2_data):
         """
-        Compute spectral loss at a single scale using shape-based comparison.
-        This ignores overall volume differences and focuses on spectral shape.
-        FIXED: Handles identical signals correctly and removes log bias.
+        Compute spectral loss at a single scale.
+        Supports both normalized (volume-invariant) and original loss calculation.
         """
-        # Get amplitude spectra (these are float32 from STFT)
-        stft_x_f32 = ch1_data['amplitude']  
-        stft_y_f32 = ch2_data['amplitude']  
+        # Get amplitude spectra (float32 from STFT)
+        stft_x_f32 = ch1_data['amplitude']  # Target/reference
+        stft_y_f32 = ch2_data['amplitude']  # Instrument/input
         
         # Convert to float64 for precise loss computation
         stft_x = stft_x_f32.astype(np.float64)
         stft_y = stft_y_f32.astype(np.float64)
         
-        # Ensure same length (should already be, but just in case)
+        # Ensure same length
         min_len = min(len(stft_x), len(stft_y))
         stft_x = stft_x[:min_len]
         stft_y = stft_y[:min_len]
         
+        if self.use_normalized_loss:
+            # NEW: Volume-invariant normalized loss
+            return self._compute_normalized_loss(stft_x, stft_y)
+        else:
+            # ORIGINAL: Non-normalized loss (existing implementation)
+            return self._compute_original_loss(stft_x, stft_y)
+
+    def _compute_normalized_loss(self, stft_x, stft_y):
+        """
+        Compute volume-invariant normalized loss.
+        """
+        eps = 1e-8
+        norm_x = np.linalg.norm(stft_x) + eps
+        norm_y = np.linalg.norm(stft_y) + eps
+        
+        # Safety check: if instrument signal is too weak, penalize heavily
+        if norm_y < self.min_signal_threshold:
+            logger.warning(f"Weak signal detected: {norm_y:.4f} < {self.min_signal_threshold}")
+            return self.weak_signal_penalty, 1
+        
+        if self.normalization_method == "cosine":
+            # Cosine similarity approach
+            cosine_sim = np.dot(stft_x, stft_y) / (norm_x * norm_y)
+            cosine_sim = np.clip(cosine_sim, -1.0, 1.0)
+            cosine_distance = 1.0 - cosine_sim
+            scale_loss = cosine_distance * 10.0  # Scale to reasonable range
+            
+        else:  # "l2" - Frobenius norm approach
+            # Normalize both to unit vectors
+            stft_x_norm = stft_x / norm_x
+            stft_y_norm = stft_y / norm_y
+            
+            # Compute difference on normalized spectra
+            diff = stft_x_norm - stft_y_norm
+            
+            # Frobenius norm
+            frobenius_loss = np.linalg.norm(diff)
+            
+            # L1 norm
+            l1_loss = np.sum(np.abs(diff))
+            log_l1 = np.log1p(l1_loss) if l1_loss > 1e-12 else 0.0
+            
+            scale_loss = frobenius_loss + log_l1
+        
+        # Direction based on which needs more energy
+        direction = np.sign(norm_x - norm_y)
+        
+        return scale_loss, direction
+
+    def _compute_original_loss(self, stft_x, stft_y):
+        """
+        Original non-normalized loss (existing implementation).
+        This ignores overall volume differences and focuses on spectral shape.
+        FIXED: Handles identical signals correctly and removes log bias.
+        """
         # Compute difference
         diff = stft_x - stft_y
 
         # EARLY EXIT: If signals are truly identical, return 0 immediately
         max_abs_diff = np.max(np.abs(diff))
-        if max_abs_diff < 1e-12:  # More stringent threshold
+        if max_abs_diff < 1e-12:
             return 0.0, 0
 
         # Get the sign of the difference
@@ -616,58 +697,49 @@ class MultiScaleSpectralLoss:
         
         # Handle silent/identical signals properly
         if frobenius_norm_x < 1e-8 and frobenius_norm_y < 1e-8:
-            # Both signals are silent - no difference
             normalized_frobenius = 0.0
         elif frobenius_norm_x < 1e-8:
-            # Reference is silent but target has signal - use target norm
             if frobenius_norm_y > 1e-8:
                 normalized_frobenius = frobenius_norm_diff / frobenius_norm_y
             else:
                 normalized_frobenius = 0.0
         else:
-            # Normal case - reference has signal
             normalized_frobenius = frobenius_norm_diff / frobenius_norm_x
         
-        # Component 2: FIXED Log L1 norm
+        # Component 2: Log L1 norm
         l1_norm_diff = np.sum(np.abs(diff))
         
-        # FIX: Use small epsilon instead of +1.0 to avoid bias
-        if l1_norm_diff > 1e-12:  # Stricter threshold
-            eps = 1e-15  # Small epsilon to prevent log(0)
-            log_l1 = np.log(l1_norm_diff + eps)
-        else:
-            log_l1 = 0.0  # No difference = no log component
+        log_l1 = np.log1p(l1_norm_diff) if l1_norm_diff > 1e-12 else 0.0
         
         # Total loss for this scale
         scale_loss = normalized_frobenius + log_l1
         
         return scale_loss, direction
-        
+                    
+            
     def get_current_losses(self):
         """Get the most recent loss computation."""
         with self.lock:
             return self.current_losses.copy() if self.current_losses else None
-        
+            
     def get_loss_history(self, n_recent=10):
         """Get recent loss history."""
         with self.lock:
             return self.loss_history[-n_recent:] if self.loss_history else []
-        
+            
     def get_average_losses(self, n_recent=10):
         """Get average losses over recent computations."""
         with self.lock:
             recent_history = self.loss_history[-n_recent:] if self.loss_history else []
-            
+                
         if not recent_history:
             return None
-            
+                
         # Average the total loss
         total_losses = [h['total_loss'] for h in recent_history if 'total_loss' in h]
         if total_losses:
             return {'total_loss': np.mean(total_losses)}
         return None
-
-
 class EnhancedAudio(SimpleAudio):
     """
     Enhanced audio class with STFT processing and multi-scale spectral loss.
@@ -675,15 +747,22 @@ class EnhancedAudio(SimpleAudio):
     """
     
     def __init__(self, 
-                 sample_rate=44100, 
-                 channels=2,  # Default to stereo for spectral loss
-                 buffer_size=1024, 
-                 input_device=None,
-                 output_device=None,
-                 stft_window_size=2048,
-                 stft_hop_length=512,
-                 stft_window_type='hann',
-                 enable_spectral_loss=True):
+                sample_rate=44100, 
+                channels=2,  # Default to stereo for spectral loss
+                buffer_size=1024, 
+                input_device=None,
+                output_device=None,
+                stft_window_size=2048,
+                stft_hop_length=512,
+                stft_window_type='hann',
+                enable_spectral_loss=True,
+                stft_scales=None,        
+                use_pyfftw=True,       
+                fft_threads=2,
+                use_normalized_loss=True,              
+                min_signal_threshold=0.1,             
+                weak_signal_penalty=50.0,             
+                normalization_method="l2"):        
         """
         Initialize enhanced audio system with STFT processing and spectral loss.
         """
@@ -703,8 +782,14 @@ class EnhancedAudio(SimpleAudio):
         if enable_spectral_loss and channels >= 2:
             self.spectral_loss = MultiScaleSpectralLoss(
                 sample_rate=sample_rate,
-                scales=[512, 1024, 2048, 4096],  # STFT scales
-                window_type=stft_window_type
+                scales=stft_scales if stft_scales else [512, 1024, 2048, 4096],
+                window_type=stft_window_type,
+                use_pyfftw=use_pyfftw,  
+                fft_threads=fft_threads,
+                use_normalized_loss=use_normalized_loss,          
+                min_signal_threshold=min_signal_threshold,       
+                weak_signal_penalty=weak_signal_penalty,         
+                normalization_method=normalization_method
             )
         else:
             self.spectral_loss = None
