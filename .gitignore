@@ -1,1 +1,15 @@
 __pycache__
+*.pyo
+*.pyc
+
+# Training artefacts
+checkpoints/
+logs/
+*.log
+results/
+training_results/
+
+.DS_Store
+
+*-env/
+
