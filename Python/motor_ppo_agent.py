@@ -61,10 +61,10 @@ class MotorPPOAgent:
                  min_temperature=0.3, 
                  normalize_advantages=True,   
                  normalize_returns=False,         
-                 use_gae=True, actor_hidden_layers=[64, 64],     # ADD
-                 critic_hidden_layers=[64, 64],    # ADD
-                 use_layernorm=True,               # ADD
-                 dropout_rate=0.1,                 # ADD
+                 use_gae=True, actor_hidden_layers=[64, 64],     
+                 critic_hidden_layers=[64, 64],   
+                 use_layernorm=True,              
+                 dropout_rate=0.1,               
                  activation='relu'):
         
         """Initialize the motor PPO agent."""
@@ -197,6 +197,7 @@ class MotorPPOAgent:
         states = torch.FloatTensor(np.array(self.memory.states)).to(self.device)
         actions = torch.LongTensor(np.array(self.memory.actions)).to(self.device)
         old_log_probs = torch.FloatTensor(np.array(self.memory.log_probs)).to(self.device)
+        old_values = torch.FloatTensor(np.array(self.memory.values)).to(self.device)  # NEW!
         returns = torch.FloatTensor(returns).to(self.device)
         
         # Update for multiple epochs
@@ -211,6 +212,7 @@ class MotorPPOAgent:
                 batch_states = states[batch_indices]
                 batch_actions = actions[batch_indices]
                 batch_old_log_probs = old_log_probs[batch_indices]
+                batch_old_values = old_values[batch_indices]
                 batch_returns = returns[batch_indices]
                 
                 # Evaluate actions
@@ -229,8 +231,20 @@ class MotorPPOAgent:
                 surr2 = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * advantages
                 actor_loss = -torch.min(surr1, surr2).mean()
                 
-                # Value loss
-                value_loss = F.mse_loss(state_values, batch_returns)
+                # Value Loss
+                # Compute clipped predictions
+                value_pred_clipped = batch_old_values + torch.clamp(
+                    state_values - batch_old_values,
+                    -self.clip_param,  # e.g., -0.2
+                    self.clip_param    # e.g., +0.2
+                )
+
+                # Compute both losses
+                value_loss_unclipped = F.mse_loss(state_values, batch_returns)
+                value_loss_clipped = F.mse_loss(value_pred_clipped, batch_returns)
+
+                # Take the maximum
+                value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
                 
                 # Entropy bonus
                 entropy_loss = -entropy.mean()
