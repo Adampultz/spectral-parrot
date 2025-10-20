@@ -1,0 +1,1 @@
+osc_handler: make self.numBands an argument to the functio (see line 39)
