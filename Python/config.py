@@ -26,7 +26,7 @@ class TrainingConfig:
     use_motors: bool = True
     manual_calibration: bool = False # Set to True if you wish to calibrate the motors prior to training. See the README file on motor positioning
     motor_speed: int = 200 
-    motor_steps: int = 50 # How many steps a motor will move per learning step
+    motor_steps: int = 25 # How many steps a motor will move per learning step
     step_wait_time: float = 1.0 # The time in seconds between the termination of all motors and the next step. 
     reset_wait_time: float = 2 # The time in seconds to allow the strings to settle after an episode reset (which includes motor recalibration)
     reset_calibration: int = 1  # 0: center, 1: random, 2: skip
@@ -39,7 +39,7 @@ class TrainingConfig:
     danger_zone_ratio: float = 0.1               # Start penalties at 10% from limit
     critical_zone_ratio: float = 0.02            # Severe penalties at 2% from limit
     ccw_safety_margin: int = 200                 # Safety margin before CCW limit
-    limit_penalty: float = 0.0          # Penalty for hitting limit
+    limit_penalty: float = 0.0                  # Penalty for hitting limit
 
     # ========================================
     # PPO Hyperparameters
@@ -52,10 +52,10 @@ class TrainingConfig:
     
     # Learning rates
     lr_actor: float = 1e-4
-    lr_critic: float = 1e-5
+    lr_critic: float = 0.0003
     
     # PPO algorithm parameters
-    gamma: float = 0.995
+    gamma: float = 0.98 # Down from 0.995
     gae_lambda: float = 0.95
     clip_param: float = 0.2
     entropy_coef: float = 0.01
@@ -175,7 +175,7 @@ class TrainingConfig:
     # StallGuard Configuration (NEW)
     # ========================================
     stallguard_threshold: int = 150              # Global StallGuard threshold (0-255)
-    stallguard_warnings_before_stop: int = 10    # Number of warnings before emergency stop
+    stallguard_warnings_before_stop: int = 5    # Number of warnings before emergency stop
     use_per_motor_stallguard: bool = False       # Use different thresholds per motor
     per_motor_stallguard: List[int] = field(default_factory=lambda: [150]*8)  # Per-motor SG thresholds
     
