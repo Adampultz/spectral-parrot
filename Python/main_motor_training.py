@@ -17,6 +17,8 @@ from pythonosc import udp_client
 from datetime import datetime
 from collections import deque
 from config import TrainingConfig
+from save_session_hyperparameters import save_session_hyperparameters
+
 
 # Setup logging
 logging.basicConfig(
@@ -311,7 +313,7 @@ def create_directories(config: TrainingConfig):
     """Create necessary directories."""
     os.makedirs(config.checkpoint_dir, exist_ok=True)
     os.makedirs(config.results_dir, exist_ok=True)
-
+    os.makedirs(os.path.join(config.results_dir, "hyperparameters"), exist_ok=True) 
 
 def train(config: TrainingConfig, resume_from: Optional[str] = None):
     """
@@ -372,6 +374,7 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             try:
                 agent, training_state, loaded_config = load_checkpoint(resume_from, device=device)
                 
+                resumed = True
                 # Optionally override config with loaded config
                 # config = loaded_config  # Uncomment to use saved config
                 
@@ -388,6 +391,15 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     
     session_log_path = setup_session_logging(config, training_state, resumed=resumed)
     logger.info(f"Session log: {session_log_path}")
+
+    hyperparams_file = save_session_hyperparameters(
+        config=config,
+        training_state=training_state,
+        hyperparams_dir=os.path.join(config.results_dir, "hyperparameters"),
+        resumed=resumed,
+        resumed_from=resume_from if resumed else None
+    )
+    logger.info(f"✓ Hyperparameters saved to: {hyperparams_file}")
     
     # 1. Setup audio system
     logger.info("Setting up audio system...")
