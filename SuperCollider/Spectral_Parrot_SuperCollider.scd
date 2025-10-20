@@ -58,9 +58,9 @@ s.options.inDevice_(
 ~trainingAudioAddress = "/Users/adammac2023/Documents/Musik-business/Adam/2024/STIP-4/Audio/Training sets/Drones_summed.wav";*/
 
 
-~trainingAudioAddress = "/Users/adammac2023/Documents/Musik-business/Projects/Spectral Parrot/Audio/Training Audio/2.09.2025/untitled_01.wav";
+/*~trainingAudioAddress = "/Users/adammac2023/Documents/Musik-business/Projects/Spectral Parrot/Audio/Training Audio/2.09.2025/untitled_01.wav";*/
 
-/*~trainingAudioAddress = "/Users/adammac2023/Documents/Musik-business/Projects/Spectral Parrot/Audio/Training Audio/15.09.2025/2.wav";*/
+~trainingAudioAddress = "/Users/adammac2023/Documents/Musik-business/Projects/Spectral Parrot/Audio/Training Audio/15.09.2025/2.wav";
 
 
 ~pythonOSCAddress = NetAddr("127.0.0.1", 3333);  // Python's receiving port
@@ -266,7 +266,7 @@ s.waitForBoot({
 		8.do{|i| Out.kr(~ampDiffs[i], ampDiffNeighbours[i])};
 		8.do{|i| Out.kr(~sineStates[i], sineState[i])};
 
-		sumSigs = Mix(LeakDC.ar(oscArray * sineAM)) * 3.0;
+		sumSigs = Mix(LeakDC.ar(oscArray * sineAM)) * 4.0;
 
 		// Output mixed signal
 		Out.ar(outChan, sumSigs);
