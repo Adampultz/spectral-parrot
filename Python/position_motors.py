@@ -130,6 +130,11 @@ def calibrate_find_cw_limits(controller, speed=200):
     
     # Clear any pending responses
     controller.get_responses(clear=True)
+
+    print(f"Setting calibration speed to {speed} for all motors...")
+    for motor in range(1, 9):
+        controller.set_speed(motor, speed)
+        time.sleep(0.05)
     
     print("Starting CW movement for all motors...")
     print("Motors will stop when StallGuard detects mechanical limit\n")
