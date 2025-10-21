@@ -251,6 +251,7 @@ def load_checkpoint(checkpoint_path: str,
         agent = MotorPPOAgent(
             state_dim=2,
             num_motors=config.num_motors,
+            num_actions_per_motor=config.get_num_actions_per_motor(),
             device=device,
             hidden_size=config.hidden_size,
             lr_actor=config.lr_actor,
@@ -260,7 +261,21 @@ def load_checkpoint(checkpoint_path: str,
             clip_param=config.clip_param,
             entropy_coef=config.entropy_coef,
             batch_size=config.batch_size,
-            hold_bias=config.hold_bias
+            hold_bias=config.hold_bias,
+            step_size_logits_bias=config.step_size_logits_bias,
+            max_grad_norm=config.max_grad_norm,
+            initial_temperature=config.initial_temperature,
+            temperature_decay=config.temperature_decay,
+            min_temperature=config.min_temperature,
+            value_coef=config.value_coef,               
+            normalize_advantages=config.normalize_advantages, 
+            normalize_returns=config.normalize_returns,       
+            use_gae=config.use_gae,
+            actor_hidden_layers=config.actor_hidden_layers,      
+            critic_hidden_layers=config.critic_hidden_layers,   
+            use_layernorm=config.use_layernorm,                 
+            dropout_rate=config.dropout_rate,                  
+            activation=config.activation_function
         )
     
     # Load agent state
@@ -338,6 +353,12 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     # Set logging level
     log_level = getattr(logging, config.log_level.upper(), logging.INFO)
     logging.getLogger().setLevel(log_level)
+
+    if config.use_variable_step_sizes:
+        logger.info(f"Using variable step sizes: {config.available_step_sizes}")
+        logger.info(f"Actions per motor: {2 * len(config.available_step_sizes) + 1}")
+    else:
+        logger.info(f"Using fixed step size: {config.per_motor_steps}")
     
     # Print experiment info
     logger.info(f"Experiment: {config.experiment_name}")
@@ -449,13 +470,16 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         loss_processor=loss_processor,
         motor_controller=motor_controller,
         num_motors=config.num_motors,
+        motor_steps=config.per_motor_steps,
+        use_variable_step_sizes=config.use_variable_step_sizes,
+        available_step_sizes=config.available_step_sizes,
+        step_size_logits_bias=getattr(config, 'step_size_logits_bias', None),
         step_wait_time=config.step_wait_time,
         reset_wait_time=config.reset_wait_time,
         early_stopping_threshold=config.early_stopping_threshold,
         max_steps_without_improvement=config.max_steps_without_improvement,
         use_motors=config.use_motors,
         motor_speed=config.motor_speed,
-        motor_steps=config.motor_steps,
         reward_scale=config.reward_scale,
         max_ccw_steps=config.max_ccw_steps,
         max_cw_steps=config.max_cw_steps,
@@ -519,6 +543,7 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         agent = MotorPPOAgent(
             state_dim=2,
             num_motors=config.num_motors,
+            num_actions_per_motor=config.get_num_actions_per_motor(),
             device=device,
             hidden_size=config.hidden_size,
             lr_actor=config.lr_actor,
@@ -529,6 +554,7 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             entropy_coef=config.entropy_coef,
             batch_size=config.batch_size,
             hold_bias=config.hold_bias,
+            step_size_logits_bias=config.step_size_logits_bias,
             max_grad_norm=config.max_grad_norm,
             initial_temperature=config.initial_temperature,
             temperature_decay=config.temperature_decay,
@@ -594,9 +620,22 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             
             # Log step details based on config
             if step % config.log_frequency == 0 and config.log_motor_details:
+                if config.use_variable_step_sizes and 'movement_details' in info:
+                    # Enhanced logging with step sizes
+                    movements = []
+                    for motor_num in sorted(info['motors_moved']):
+                        direction, step_size = info['movement_details'][motor_num]
+                        # Convert direction number to string
+                        dir_str = 'CCW' if direction == -1 else 'CW' if direction == 1 else 'HOLD'
+                        movements.append(f"{motor_num}:{dir_str}{step_size}")  # ✅ CORRECT
+                    motors_str = f"[{', '.join(movements)}]" if movements else "[]"
+                else:
+                    # Legacy logging
+                    motors_str = str(info['motors_moved'])
+                
                 logger.info(f"Episode {training_state.episode}, Step {step}: "
                         f"Loss={info['spectral_loss']:.4f}, "
-                        f"Reward={reward:.2f}, Motors moved: {info['motors_moved']}")
+                        f"Reward={reward:.2f}, Motors moved: {motors_str}")
             
             # Move to next state
             obs = next_obs
@@ -846,7 +885,11 @@ def main():
     parser.add_argument('--skip-calibration', action='store_true', 
                    help='Skip initial motor calibration')
     parser.add_argument('--calibration-mode', type=int, choices=[0, 1, 2],
-                   help='Calibration mode: 0=center, 1=random (default), 2=skip')
+                   help='Calibration mode: 0=center, 1=random (default), 2=skip')  
+    parser.add_argument('--step-sizes', type=int, nargs='+',
+                       help='Available step sizes (e.g., --step-sizes 25 50 75 100)')
+    parser.add_argument('--disable-variable-steps', action='store_true',
+                       help='Use fixed motor_steps instead')
     
     args = parser.parse_args()
     
@@ -894,7 +937,12 @@ def main():
     if args.skip_calibration:
         config.reset_calibration = 2
     if args.calibration_mode is not None:
-        config.reset_calibration = args.calibration_mode 
+        config.reset_calibration = args.calibration_mode
+    if args.step_sizes:
+        config.use_variable_step_sizes = True
+        config.available_step_sizes = args.step_sizes   
+    if args.disable_variable_steps:
+        config.use_variable_step_sizes = False
 
     # Save config if requested
     if args.save_config:

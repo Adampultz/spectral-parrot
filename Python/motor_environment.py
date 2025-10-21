@@ -85,7 +85,10 @@ class MotorEnvironment(gym.Env):
                 max_ep_length=1024,
                 use_motors=True,
                 motor_speed=200,
-                motor_steps=100,
+                motor_steps=50,
+                use_variable_step_sizes: bool = False,
+                available_step_sizes: List[int] = None,
+                step_size_logits_bias: List[float] = None,
                 max_ccw_steps: List[int] = None,
                 max_cw_steps: List[int] = None,
                 cw_limit_position: int = 5000,  # Position when at CW limit (StallGuard message from ESP32)
@@ -167,6 +170,7 @@ class MotorEnvironment(gym.Env):
         # Motor parameters
         self.motor_speed = motor_speed
         self.motor_steps = motor_steps
+        self.use_variable_step_sizes = use_variable_step_sizes
 
         self.adaptive_hold_bias = adaptive_hold_bias
         self.stagnation_threshold = 0.5
@@ -266,6 +270,26 @@ class MotorEnvironment(gym.Env):
             critical_zone_ratio=critical_zone_ratio
         )
 
+        if self.use_variable_step_sizes:
+            if not available_step_sizes:
+                raise ValueError("available_step_sizes required when use_variable_step_sizes=True")
+            self.available_step_sizes = sorted(available_step_sizes)
+            self.num_step_sizes = len(self.available_step_sizes)
+        else:
+            # Legacy: single step size
+            self.available_step_sizes = [motor_steps]
+            self.num_step_sizes = 1
+        
+        # Calculate action space
+        self.num_actions_per_motor = 2 * self.num_step_sizes + 1
+        self.hold_action_index = self.num_step_sizes
+        
+        # Update action space definition
+        self.action_space = spaces.MultiDiscrete([self.num_actions_per_motor] * num_motors)
+        
+        # Track step size usage
+        self.action_step_size_counts = np.zeros(len(self.available_step_sizes), dtype=np.int64)
+
         if self.use_motors and self.motor_controller:
             logger.info("Enabling motor drivers...")
             try:
@@ -315,6 +339,29 @@ class MotorEnvironment(gym.Env):
         logger.info(f"MotorEnvironment initialized with {num_motors} motors")
         logger.info(f"Action space: {self.action_space}")
         logger.info(f"Observation space: {self.observation_space}")
+    
+    def _decode_action(self, action_idx: int) -> Tuple[int, int]:
+        """
+        Decode action index to (direction, step_size).
+        
+        Returns:
+            (direction, step_size) where direction is -1/0/+1
+        """
+        if action_idx < self.num_step_sizes:
+            # CCW: actions 0 to N-1
+            direction = -1
+            step_size = self.available_step_sizes[action_idx]
+        elif action_idx == self.hold_action_index:
+            # HOLD: action N
+            direction = 0
+            step_size = 0
+        else:
+            # CW: actions N+1 to 2N
+            direction = 1
+            step_size_idx = action_idx - self.hold_action_index - 1
+            step_size = self.available_step_sizes[step_size_idx]
+        
+        return direction, step_size
 
     def _get_adaptive_movement_penalty(self):
         """Calculate current movement penalty based on training progress."""
@@ -469,9 +516,35 @@ class MotorEnvironment(gym.Env):
             logger.info(f"Motor {motor_num} centered at position {-center_offset}")
 
         logger.info("Motors homed successfully")
+
+    def get_action_distribution_stats(self) -> dict:
+        """Get step size usage statistics."""
+        stats = {}
+        
+        if self.use_variable_step_sizes:
+            total = self.action_step_size_counts.sum()
+            if total > 0:
+                step_size_dist = {}
+                for i, size in enumerate(self.available_step_sizes):
+                    count = int(self.action_step_size_counts[i])
+                    pct = 100 * count / total
+                    step_size_dist[size] = {'count': count, 'percentage': pct}
+                
+                stats['step_size_distribution'] = step_size_dist
+                stats['total_movements'] = int(total)
+        
+        return stats
     
     def step(self, actions):
-
+        """
+        Execute one environment step with variable step sizes.
+        
+        Args:
+            actions: Array of motor action indices [num_motors]
+                    
+        Returns:
+            observation, reward, terminated, truncated, info
+        """
         self.episode_steps += 1
         
         if len(actions) != self.num_motors:
@@ -479,75 +552,85 @@ class MotorEnvironment(gym.Env):
         
         motors_moving = set()
         movement_commands = {}
+        movement_details = {} 
         total_limit_penalty = 0
         
+        # ============================================================
+        # STEP 1: Process each motor's action
+        # ============================================================
         for i, action in enumerate(actions):
             motor_num = i + 1
             current_pos = self.motor_positions[i]
-
+            
+            # Decode action to get direction and step size
+            action_idx = int(action)
+            direction, step_size = self._decode_action(action_idx)
+            
             soft_penalty = self.limit_handler.get_limit_penalty(i, current_pos)
             if soft_penalty > 0:
-                total_limit_penalty += soft_penalty * 0.1  # Scale down
-                if soft_penalty > 1.0:  # Only log significant penalties
+                total_limit_penalty += soft_penalty * 0.1
+                if soft_penalty > 1.0:
                     logger.debug(f"Motor {motor_num} soft penalty: {soft_penalty:.2f} at pos {current_pos}")
-                
-            if action == 1:  # HOLD
+            
+            # HOLD action
+            if direction == 0:
                 continue
-                
-            elif action == 0:  # CCW
-                # Check if movement would exceed limit
-                proposed_pos = current_pos - self.motor_steps
+            
+            # Track step size usage
+            if self.use_variable_step_sizes:
+                step_size_idx = self.available_step_sizes.index(step_size)
+                self.action_step_size_counts[step_size_idx] += 1
+            
+            # CCW action
+            if direction == -1:
+                proposed_pos = current_pos - step_size
                 
                 if proposed_pos <= -self.max_ccw_steps[i]:
-                    # BLOCK ENTIRELY - treat as HOLD
                     logger.warning(f"Motor {motor_num} blocked at CCW limit (pos: {current_pos})")
                     self.limit_violations[i] += 1
                     total_limit_penalty += self.limit_penalty
-                    # Don't add to movement_commands - motor stays still
-                    
                 else:
-                    # Full movement allowed
-                    movement_commands[motor_num] = ('CCW', self.motor_steps)
-                    # self.motor_positions[i] -= self.motor_steps # Keeping this for now, remove if nothing breaks
+                    movement_commands[motor_num] = ('CCW', step_size)
+                    movement_details[motor_num] = (-1, step_size)  
                     motors_moving.add(motor_num)
-                    
-            elif action == 2:  # CW
-                # Check if movement would exceed limit
-                proposed_pos = current_pos + self.motor_steps
+            
+            # CW action        
+            elif direction == 1:
+                proposed_pos = current_pos + step_size
                 
                 if proposed_pos > self.max_cw_steps[i]:
-                    # BLOCK ENTIRELY - treat as HOLD
                     logger.warning(f"Motor {motor_num} blocked at CW limit (pos: {current_pos} → {proposed_pos}, limit: {self.max_cw_steps[i]})")
                     self.limit_violations[i] += 1
                     total_limit_penalty += self.limit_penalty
-                    # Don't add to movement_commands - motor stays still
-                    
                 else:
-                    # Full movement allowed
-                    movement_commands[motor_num] = ('CW', self.motor_steps)
-                    # self.motor_positions[i] += self.motor_steps # Keeping this for now, remove if nothing breaks
+                    movement_commands[motor_num] = ('CW', step_size)
+                    movement_details[motor_num] = (1, step_size)  
                     motors_moving.add(motor_num)
         
-        # Execute motor movements (only motors not blocked by limits)
+        # ============================================================
+        # STEP 2: Execute motor movements
+        # ============================================================
         if self.use_motors and self.motor_controller and motors_moving:
             logger.debug(f"Moving motors: {sorted(motors_moving)}")
             
-            # Simple execution - all movements are full motor_steps
-            for motor_num, (direction, steps) in movement_commands.items():
+            # Send commands to motors
+            for motor_num, (direction_str, steps) in movement_commands.items():
                 self.motor_controller.set_speed(motor_num, self.motor_speed)
-                self.motor_controller.set_direction(motor_num, 0 if direction == 'CCW' else 1)
+                self.motor_controller.set_direction(motor_num, 0 if direction_str == 'CCW' else 1)
                 self.motor_controller.move_steps(motor_num, steps)
-                logger.debug(f"Motor {motor_num}: {direction} {steps} steps")
+                logger.debug(f"Motor {motor_num}: {direction_str} {steps} steps")
             
             # Wait for completion
             completion_info = self._wait_for_motors_completion(
-                motors_moving, movement_commands, timeout=30.0, stabilization_time=self.step_wait_time
+                motors_moving, movement_commands, 
+                timeout=30.0, 
+                stabilization_time=self.step_wait_time
             )
 
-            # NOW update positions (after movement confirmed)
-            for motor_num, (direction, steps) in movement_commands.items():
+            # Update positions AFTER movement confirmed
+            for motor_num, (direction_str, steps) in movement_commands.items():
                 motor_idx = motor_num - 1
-                if direction == 'CCW':
+                if direction_str == 'CCW':
                     self.motor_positions[motor_idx] -= steps
                 else:  # CW
                     self.motor_positions[motor_idx] += steps
@@ -555,16 +638,19 @@ class MotorEnvironment(gym.Env):
         else:
             time.sleep(self.step_wait_time)
         
-        # Get observation and calculate reward
+        # ============================================================
+        # STEP 3: Get observation and calculate reward
+        # ============================================================
         observation = self._get_observation()
         current_loss = float(observation[0])
         self.loss_history.append(current_loss)
         
-        # Calculate reward with penalties
+        # Calculate reward
         reward = self._calculate_sophisticated_reward(current_loss, len(motors_moving))
-        # reward -= total_limit_penalty
         
-        # Check termination
+        # ============================================================
+        # STEP 4: Check termination conditions
+        # ============================================================
         terminated = False
         if self.use_early_stopping and current_loss < self.early_stopping_threshold:
             terminated = True
@@ -576,13 +662,19 @@ class MotorEnvironment(gym.Env):
                 terminated = True
                 logger.info(f"Early stopping: reward {reward:.2f} >= threshold {self.reward_threshold_for_early_stop}")
         
-        # Check truncation with config
+        # Check truncation
         truncated = False
         if self.use_truncation and self.episode_steps >= self.min_episode_steps:
             if self.steps_without_improvement >= self.max_steps_without_improvement:
                 truncated = True
         
-        # Update tracking
+        if self.episode_steps >= self.max_ep_length:
+            truncated = True
+            logger.info(f"Max episode length reached: {self.episode_steps}")
+        
+        # ============================================================
+        # STEP 5: Update tracking and return
+        # ============================================================
         self.previous_loss = current_loss
         if current_loss < self.best_loss:
             self.best_loss = current_loss
@@ -596,16 +688,13 @@ class MotorEnvironment(gym.Env):
             'best_loss': self.best_loss,
             'steps_without_improvement': self.steps_without_improvement,
             'motors_moved': list(motors_moving),
+            'movement_details': movement_details if self.use_variable_step_sizes else {},
             'motor_positions': self.motor_positions.copy(),
             'limit_violations': self.limit_violations.copy(),
             'episode_steps': self.episode_steps,
             'is_stagnant': self.is_stagnant(),
             'recommended_hold_bias': self.get_recommended_hold_bias()
         }
-
-        if self.episode_steps >= self.max_ep_length:
-            truncated = True
-            logger.info(f"Max episode length reached: {self.episode_steps}")
         
         return observation, reward, terminated, truncated, info
 

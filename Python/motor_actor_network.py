@@ -14,8 +14,16 @@ class MotorActorNetwork(nn.Module):
     Simplified actor network for discrete motor control.
     Each motor has 3 actions: CCW (0), HOLD (1), CW (2)
     """
-    def __init__(self, state_dim, num_motors, hidden_layers=[64, 64], 
-                 use_layernorm=True, dropout_rate=0.1, hold_bias=0.5, activation='relu'):
+    def __init__(self, 
+                 state_dim, 
+                 num_motors, 
+                 num_actions_per_motor=3,
+                 hidden_layers=[64, 64], 
+                 use_layernorm=True, 
+                 dropout_rate=0.1, 
+                 hold_bias=0.5, 
+                 step_size_logits_bias=None,
+                 activation='relu'):
         """
         Initialize the motor actor network.
         
@@ -30,7 +38,10 @@ class MotorActorNetwork(nn.Module):
         
         self.num_motors = num_motors
         self.state_dim = state_dim
+        self.num_actions_per_motor = num_actions_per_motor
         self.hold_bias = hold_bias
+        self.step_size_logits_bias = step_size_logits_bias
+        self.hold_action_index = (num_actions_per_motor - 1) // 2
 
         # Select activation function
         if activation == 'relu':
@@ -68,22 +79,13 @@ class MotorActorNetwork(nn.Module):
         #     nn.Dropout(dropout_rate)
         # )
 
-        # Action heads (use last hidden size)
         final_hidden = hidden_layers[-1] if hidden_layers else state_dim
+        # Action heads (use last hidden size)
         self.motor_heads = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(final_hidden, final_hidden // 2),
                 self.activation_fn,
-                nn.Linear(final_hidden // 2, 3)
-            ) for _ in range(num_motors)
-        ])
-        
-        # Separate action head for each motor (3 actions each)
-        self.motor_heads = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(hidden_size, hidden_size // 2),
-                nn.ReLU(),
-                nn.Linear(hidden_size // 2, 3)  # 3 actions: CCW, HOLD, CW
+                nn.Linear(final_hidden // 2, num_actions_per_motor)  # VARIABLE
             ) for _ in range(num_motors)
         ])
         
@@ -96,26 +98,40 @@ class MotorActorNetwork(nn.Module):
     def _initialize_weights(self):
         """Initialize weights with bias toward HOLD action."""
         for motor_head in self.motor_heads:
-            # Get the final linear layer
             final_layer = motor_head[-1]
-            
-            # Small random weights
             nn.init.normal_(final_layer.weight, std=0.01)
-            
-            # Bias toward HOLD (action 1)
             nn.init.zeros_(final_layer.bias)
-            final_layer.bias.data[1] = self.hold_bias  # Slight preference for HOLD
-    
-    def forward(self, state):
+            # Use dynamic hold_action_index instead of hardcoded 1
+            final_layer.bias.data[self.hold_action_index] = self.hold_bias
+
+    def _apply_action_biases(self, logits: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass through the network.
+        Apply biases to action logits.
         
         Args:
-            state: State tensor [batch_size, state_dim]
-            
+            logits: Action logits [batch_size, num_motors, num_actions_per_motor]
+        
         Returns:
-            action_dists: List of Categorical distributions for each motor
+            logits: Biased logits with same shape
         """
+        # Hold bias (always applied)
+        if self.hold_bias != 0.0:
+            logits[:, :, self.hold_action_index] += self.hold_bias
+        
+        # Step size biases (optional - for exploration)
+        if self.step_size_logits_bias is not None:
+            num_step_sizes = (self.num_actions_per_motor - 1) // 2
+            
+            for i, bias in enumerate(self.step_size_logits_bias):
+                # Apply to CCW actions
+                logits[:, :, i] += bias
+                # Apply to CW actions (mirror on other side of HOLD)
+                logits[:, :, self.hold_action_index + 1 + i] += bias
+        
+        return logits
+    
+    def forward(self, state):
+        """Forward pass through the network."""
         # Input validation
         state = torch.nan_to_num(state, nan=0.0)
         state = torch.clamp(state, -10.0, 10.0)
@@ -127,6 +143,12 @@ class MotorActorNetwork(nn.Module):
         action_dists = []
         for motor_head in self.motor_heads:
             logits = motor_head(features)
+            
+            # Apply action biases (HOLD + optional step size biases)
+            logits = logits.unsqueeze(0) if logits.dim() == 1 else logits
+            logits = logits.unsqueeze(1) if logits.dim() == 2 else logits
+            logits = self._apply_action_biases(logits)
+            logits = logits.squeeze(1)
             
             # Apply temperature scaling for exploration
             if self.training and self.temperature != 1.0:
@@ -141,26 +163,30 @@ class MotorActorNetwork(nn.Module):
         Sample actions from the policy.
         
         Args:
-            state: State tensor [batch_size, state_dim]
+            state: State tensor [batch_size, state_dim] or [state_dim]
             
         Returns:
-            actions: Tensor of motor actions [batch_size, num_motors]
+            actions: Tensor of motor actions [batch_size, num_motors] or [num_motors]
             log_prob: Combined log probability of all actions
         """
         action_dists = self.forward(state)
         
         # Sample action for each motor
         actions = torch.stack([dist.sample() for dist in action_dists], dim=-1)
-
         
-
         # Calculate log probabilities
-        log_probs = torch.stack([
-            # Is this more correct?
-            # dist.log_prob(actions[:, i]) 
-            dist.log_prob(actions[i]) 
-            for i, dist in enumerate(action_dists)
-        ], dim=-1)
+        # Handle both batched and unbatched cases
+        if actions.dim() == 1:
+            log_probs = torch.stack([
+                dist.log_prob(actions[i]) 
+                for i, dist in enumerate(action_dists)
+            ], dim=-1)
+        else:
+            # Batched: actions shape is [batch_size, num_motors]
+            log_probs = torch.stack([
+                dist.log_prob(actions[:, i]) 
+                for i, dist in enumerate(action_dists)
+            ], dim=-1)
         
         # Sum log probabilities across all motors
         total_log_prob = log_probs.sum(dim=-1)

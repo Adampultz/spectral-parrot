@@ -52,7 +52,8 @@ class MotorPPOAgent:
     Simplified PPO agent for motor control.
     Only handles discrete actions for motors.
     """
-    def __init__(self, state_dim, num_motors, device='cpu', 
+    def __init__(self, state_dim, num_motors, num_actions_per_motor, step_size_logits_bias, 
+                 device='cpu', 
                  hidden_size=64, lr_actor=3e-4, lr_critic=3e-4,
                  gamma=0.99, gae_lambda=0.95, clip_param=0.2,
                  value_coef=0.5, entropy_coef=0.01, max_grad_norm=0.5,
@@ -89,10 +90,12 @@ class MotorPPOAgent:
         self.actor = MotorActorNetwork(
             state_dim, 
             num_motors, 
+            num_actions_per_motor=num_actions_per_motor,
             hidden_layers=actor_hidden_layers,
             use_layernorm=use_layernorm,
             dropout_rate=dropout_rate,
             hold_bias=hold_bias,
+            step_size_logits_bias=step_size_logits_bias,
             activation=activation
         ).to(device)
 
