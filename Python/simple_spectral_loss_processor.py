@@ -1,4 +1,14 @@
-# simple_spectral_loss_processor.py
+# simple_spectral_loss_processor.py - REFACTORED
+"""
+Improved loss processor with better timing calculations and moving average.
+
+KEY IMPROVEMENTS:
+1. Dynamic calculation of expected loss rate based on actual data
+2. More robust moving average with outlier rejection
+3. Better handling of paused state
+4. Improved ready state detection
+"""
+
 import torch
 import numpy as np
 from collections import deque
@@ -7,21 +17,32 @@ import time
 
 logger = logging.getLogger(__name__)
 
+
 class SimpleLossProcessor:
     """
-    Simple processor that gets the multi-scale spectral loss value 
-    from the existing stft_audio.py implementation and provides it 
-    as a single observation value for the RL agent.
+    Processes multi-scale spectral loss values from synchronized STFT.
+    Provides smoothed loss observations for RL agent.
     """
     
-    def __init__(self, spectral_loss_calculator, device='cpu', step_wait_time=1.0, loss_clip_max=50.0,
-                 averaging_window_factor=1.0,loss_history_buffer_size=200):
+    def __init__(self, 
+                 spectral_loss_calculator, 
+                 device='cpu', 
+                 step_wait_time=1.0, 
+                 loss_clip_max=50.0,
+                 averaging_window_factor=1.0,
+                 loss_history_buffer_size=200,
+                 outlier_rejection_threshold=3.0):
         """
-        Initialize the loss processor.
+        Initialize the loss processor with adaptive timing.
         
         Args:
-            spectral_loss_calculator: Instance of MultiScaleSpectralLoss from stft_audio.py
+            spectral_loss_calculator: Instance of MultiScaleSpectralLoss
             device: The torch device to use ('cpu' or 'cuda')
+            step_wait_time: Time to wait between motor steps (seconds)
+            loss_clip_max: Maximum loss value before clipping
+            averaging_window_factor: Multiplier for averaging window relative to step_wait_time
+            loss_history_buffer_size: Maximum number of loss entries to keep
+            outlier_rejection_threshold: Reject losses beyond this many std devs from mean
         """
         self.spectral_loss_calculator = spectral_loss_calculator
         self.device = device
@@ -29,35 +50,44 @@ class SimpleLossProcessor:
         self.step_wait_time = step_wait_time
         self.loss_clip_max = loss_clip_max
         self.averaging_window_factor = averaging_window_factor
+        self.outlier_rejection_threshold = outlier_rejection_threshold
 
-        # Calculate number of entries needed for averaging window (step_wait_time / 2)
+        # Adaptive averaging window calculation
         self.averaging_window_seconds = step_wait_time * averaging_window_factor
-        self.averaging_entries = self._calculate_averaging_entries()
+        
+        # Will be calculated dynamically based on actual loss rate
+        self.averaging_entries = None
+        self.loss_rate_hz = None  # Measured loss computation rate
         
         # Track current loss and history
         self.current_loss = 0.0
         self.current_direction = 0
-        self.loss_clip_max = loss_clip_max
         
-        # Simple circular buffer - stores dict entries like before but no complex timestamp logic
-        buffer_size = max(loss_history_buffer_size, self.averaging_entries * 2)  # At least 2x what we need
-        self.loss_history = deque(maxlen=buffer_size)
+        # Circular buffer with timestamps for adaptive window
+        self.loss_history = deque(maxlen=loss_history_buffer_size)
         self.previous_loss = None
         
-        # Track best performance for reward calculation
+        # Track best performance
         self.best_loss = float('inf')
         
-        # Track whether we've received data
+        # Ready state tracking
         self.ready = False
         self.data_received_count = 0
+        self.first_loss_time = None
+        self.last_loss_time = None
         
-        # Add callback to the spectral loss calculator to get loss values
+        # For measuring actual loss computation rate
+        self.loss_timestamps = deque(maxlen=50)  # Track last 50 timestamps
+        
+        # Add callback to receive loss values
         self.spectral_loss_calculator.add_loss_callback(self._receive_loss_data)
-        logger.info("SimpleLossProcessor initialized - will receive loss from stft_audio.py")
+        
+        logger.info("SimpleLossProcessor initialized (adaptive timing)")
         logger.info(f"  Step wait time: {step_wait_time}s")
-        logger.info(f"  Averaging window: {self.averaging_window_seconds}s")
-        logger.info(f"  Averaging over last {self.averaging_entries} entries")
-        logger.info(f"  Buffer size: {buffer_size}")
+        logger.info(f"  Target averaging window: {self.averaging_window_seconds}s")
+        logger.info(f"  Buffer size: {loss_history_buffer_size}")
+        logger.info(f"  Outlier rejection: ±{outlier_rejection_threshold} std dev")
+        logger.info(f"  Loss computation rate will be measured dynamically")
 
     def pause(self):
         """Pause loss processing (e.g., during motor calibration)."""
@@ -67,219 +97,329 @@ class SimpleLossProcessor:
     def unpause(self):
         """Resume loss processing after pause."""
         self.paused = False
-        logger.info("Loss processor RESUMED - monitoring active")
-
-    def clip_outlier_loss(self, current_loss, min_threshold=0.0, max_threshold=50.0):
-        """Clip losses to absolute thresholds"""
-        if current_loss < min_threshold:
-            logger.warning(f"Extreme low loss clipped: {current_loss:.2f} -> {min_threshold}")
-            return min_threshold
-        elif current_loss > max_threshold:
-            logger.warning(f"Extreme high loss clipped: {current_loss:.2f} -> {max_threshold}")
-            return max_threshold
-        else:
-            return current_loss
+        logger.info("Loss processor UNPAUSED - resuming normal operation")
         
-    def _calculate_averaging_entries(self):
+    def _measure_loss_rate(self):
         """
-        Calculate how many loss history entries we need for the averaging window.
-        Based on estimated update frequency of ~21ms (48kHz, largest hop=1024).
-        
-        Returns:
-            int: Number of entries to average over
+        Dynamically measure the actual loss computation rate.
+        Returns the measured rate in Hz, or None if insufficient data.
         """
-        # Estimate: loss updates every ~21ms (based on 1024 samples at 48kHz)
-        estimated_update_period = 0.021  # seconds
+        if len(self.loss_timestamps) < 10:
+            return None
         
-        entries_needed = int(np.ceil(self.averaging_window_seconds / estimated_update_period))
+        # Calculate time differences between consecutive losses
+        timestamps = list(self.loss_timestamps)
+        time_diffs = np.diff(timestamps)
         
-        # Ensure we have at least a few entries, but not too many
-        entries_needed = max(5, min(entries_needed, 200))
+        # Remove outliers (e.g., during pauses)
+        median_diff = np.median(time_diffs)
+        valid_diffs = time_diffs[time_diffs < median_diff * 3]
         
-        logger.debug(f"Averaging entries: {self.averaging_window_seconds}s / {estimated_update_period}s ≈ {entries_needed}")
-        return entries_needed  
-
-    def update_step_wait_time(self, new_step_wait_time):
-        """
-        Update the step wait time and recalculate averaging parameters.
+        if len(valid_diffs) == 0:
+            return None
         
-        Args:
-            new_step_wait_time: New step wait time in seconds
-        """
-        self.step_wait_time = new_step_wait_time
-        self.averaging_window_seconds = new_step_wait_time
-        self.averaging_entries = self._calculate_averaging_entries()
+        # Average time between losses
+        avg_period = np.mean(valid_diffs)
         
-        logger.info(f"Updated step wait time to {new_step_wait_time}s")
-        logger.info(f"New averaging window: {self.averaging_window_seconds}s ({self.averaging_entries} entries)")
-          
-        
-    def _receive_loss_data(self, loss_data):
-        """
-        Callback to receive loss data from the MultiScaleSpectralLoss calculator.
-        Simple approach - just store in circular buffer.
-        
-        Args:
-            loss_data: Dictionary with 'total_loss' and other loss information
-        """
-
-        if self.paused:
-                return
-
-        if loss_data and 'total_loss' in loss_data:
-            raw_loss = float(loss_data['total_loss'])
-        
-            # Apply outlier detection and clipping
-            self.current_loss = self.clip_outlier_loss(raw_loss, min_threshold=0.0, max_threshold=self.loss_clip_max)
-            
-            # Log when clipping occurs
-            if abs(raw_loss - self.current_loss) > 0.01:
-                logger.warning(f"Loss clipped: {raw_loss:.2f} -> {self.current_loss:.2f}")
-                self.current_loss = float(loss_data['total_loss'])
-                self.current_direction = float(loss_data.get('direction', 0.0))
-            
-            # Store in simple circular buffer - no timestamps needed!
-            entry = {
-                'loss': self.current_loss,
-                'direction': self.current_direction
-            }
-            self.loss_history.append(entry)
-            
-            # Update best loss
-            if self.current_loss < self.best_loss:
-                self.best_loss = self.current_loss
-            
-            # Track data reception
-            self.data_received_count += 1
-            if not self.ready and self.data_received_count >= 5:
-                self.ready = True
-                logger.info("SimpleLossProcessor ready - receiving loss values")
-                
-            # Log occasionally
-            if self.data_received_count % 50 == 0:
-                logger.debug(f"Loss update #{self.data_received_count}: {self.current_loss:.6f}")
-        
+        if avg_period > 0:
+            return 1.0 / avg_period
+        return None
     
+    def _update_averaging_window(self):
+        """
+        Update the number of entries to average based on measured loss rate.
+        """
+        rate = self._measure_loss_rate()
+        
+        if rate is not None and rate > 0:
+            # Calculate how many loss values we expect in the averaging window
+            expected_entries = int(rate * self.averaging_window_seconds)
+            
+            # Ensure reasonable bounds (at least 5, at most buffer_size/2)
+            self.averaging_entries = max(5, min(expected_entries, len(self.loss_history) // 2))
+            
+            # Update cached rate
+            if self.loss_rate_hz is None or abs(rate - self.loss_rate_hz) > 0.5:
+                self.loss_rate_hz = rate
+                logger.debug(f"Loss computation rate: {rate:.1f} Hz")
+                logger.debug(f"Averaging over {self.averaging_entries} entries "
+                           f"({self.averaging_entries/rate:.2f}s window)")
+        elif self.averaging_entries is None:
+            # Fallback: estimate based on typical STFT rates
+            # For buffer_size=1024 at 48kHz with hop=512, expect ~93 Hz
+            estimated_rate = self.spectral_loss_calculator.sample_rate / 512  # Conservative estimate
+            self.averaging_entries = max(10, int(estimated_rate * self.averaging_window_seconds))
+            logger.debug(f"Using estimated averaging window: {self.averaging_entries} entries")
+
+    def _receive_loss_data(self, loss_result):
+        """
+        Callback to receive loss data from the spectral loss calculator.
+        Now with outlier rejection and adaptive windowing.
+        """
+        if self.paused:
+            return
+        
+        current_time = time.time()
+        
+        # Track timestamps for rate measurement
+        self.loss_timestamps.append(current_time)
+        
+        # Update timing tracking
+        if self.first_loss_time is None:
+            self.first_loss_time = current_time
+        self.last_loss_time = current_time
+        
+        # Extract loss value
+        total_loss = loss_result.get('total_loss', 0.0)
+        direction = loss_result.get('direction', 0)
+        
+        # Clip extreme values
+        total_loss = np.clip(total_loss, 0.0, self.loss_clip_max)
+        
+        # Store in history with timestamp
+        self.loss_history.append({
+            'loss': total_loss,
+            'direction': direction,
+            'timestamp': current_time,
+            'scale_losses': loss_result.get('scale_losses', {})
+        })
+        
+        self.data_received_count += 1
+        
+        # Update averaging window periodically
+        if self.data_received_count % 20 == 0:
+            self._update_averaging_window()
+        
+        # Mark as ready after receiving enough data
+        if not self.ready and self.data_received_count >= 5:
+            self._update_averaging_window()  # Ensure we have valid averaging_entries
+            self.ready = True
+            rate_str = f"{self.loss_rate_hz:.1f}" if self.loss_rate_hz is not None else "~46"
+            logger.info(f"SimpleLossProcessor ready - receiving loss values at ~{rate_str} Hz")
+        
+        # Update current values with robust averaging
+        self._update_current_loss()
+    
+    def _update_current_loss(self):
+        """
+        Update current loss using robust moving average with outlier rejection.
+        """
+        if not self.loss_history:
+            return
+        
+        # Ensure we have valid averaging_entries
+        if self.averaging_entries is None:
+            self._update_averaging_window()
+        
+        # Get recent losses within the averaging window
+        n_avg = min(self.averaging_entries if self.averaging_entries else 10, 
+                    len(self.loss_history))
+        recent_losses = [entry['loss'] for entry in list(self.loss_history)[-n_avg:]]
+        recent_directions = [entry['direction'] for entry in list(self.loss_history)[-n_avg:]]
+        
+        if len(recent_losses) < 2:
+            # Not enough data for outlier rejection
+            self.current_loss = recent_losses[-1]
+            self.current_direction = recent_directions[-1]
+            return
+        
+        # Calculate statistics for outlier rejection
+        losses_array = np.array(recent_losses)
+        mean_loss = np.mean(losses_array)
+        std_loss = np.std(losses_array)
+        
+        # Reject outliers if we have enough data
+        if len(recent_losses) >= 5 and std_loss > 0:
+            # Keep only values within threshold standard deviations
+            valid_mask = np.abs(losses_array - mean_loss) <= (self.outlier_rejection_threshold * std_loss)
+            
+            if np.sum(valid_mask) > 0:
+                # Use filtered values
+                filtered_losses = losses_array[valid_mask]
+                filtered_directions = [d for d, v in zip(recent_directions, valid_mask) if v]
+                
+                self.current_loss = float(np.mean(filtered_losses))
+                self.current_direction = int(np.sign(np.sum(filtered_directions)))
+            else:
+                # All values were outliers - use median instead
+                self.current_loss = float(np.median(losses_array))
+                self.current_direction = int(np.sign(np.sum(recent_directions)))
+        else:
+            # Not enough data or no variance - simple average
+            self.current_loss = float(mean_loss)
+            self.current_direction = int(np.sign(np.sum(recent_directions)))
+        
+        # Track best loss
+        if self.current_loss < self.best_loss:
+            self.best_loss = self.current_loss
+
     def get_observation(self):
         """
-        Get observation averaged over the last N entries (simple circular buffer approach).
+        Get the current loss value as an observation for the RL agent.
+        Returns a tensor for compatibility with motor_environment.
         
         Returns:
-            torch.Tensor: The observation tensor with averaged loss and direction
-        """
-        if not self.ready:
-            logger.warning("Attempting to get observation before loss processor is ready")
-            loss_value = 10.0
-            direction_value = 0.0
-        else:
-            # Simple approach: average over the last N entries
-            num_recent = min(self.averaging_entries, len(self.loss_history))
-            
-            if num_recent > 0:
-                # Get the last N entries from the circular buffer
-                recent_entries = list(self.loss_history)[-num_recent:]
-                
-                # Average them
-                loss_value = np.mean([entry['loss'] for entry in recent_entries])
-                
-                # Average direction then discretize back to -1, 0, or 1
-                direction_avg = np.mean([entry['direction'] for entry in recent_entries])
-                if direction_avg > 0.1:
-                    direction_value = 1.0
-                elif direction_avg < -0.1:
-                    direction_value = -1.0
-                else:
-                    direction_value = 0.0
-                
-                # Occasionally log the averaging info
-                if num_recent > 1 and np.random.random() < 0.05:
-                    logger.debug(f"Averaged {num_recent} entries: {loss_value:.4f} "
-                                f"(current: {self.current_loss:.4f})")
-            else:
-                # Fall back to current values if no history
-                loss_value = self.current_loss
-                direction_value = self.current_direction
-        
-        # Clamp to reasonable range and ensure positive
-        loss_clamped = np.clip(loss_value, 0.0, 100.0)
-        
-        # Return as tensor with batch dimension [1, 1]
-        observation = torch.tensor([[loss_clamped, direction_value]], 
-                                 device=self.device, dtype=torch.float32)
-        
-        return observation
-    
-    def get_instantaneous_observation(self):
-        """
-        Get the instantaneous (non-averaged) observation for debugging.
-        
-        Returns:
-            torch.Tensor: The instantaneous observation tensor
+            torch.Tensor: Observation tensor [1, 2] with [loss, direction]
         """
         if not self.ready:
             loss_value = 10.0
             direction_value = 0.0
         else:
             loss_value = self.current_loss
-            direction_value = self.current_direction
+            direction_value = float(self.current_direction)
         
-        loss_clamped = np.clip(loss_value, 0.0, 100.0)
-        
-        observation = torch.tensor([[loss_clamped, direction_value]], 
-                                 device=self.device, dtype=torch.float32)
+        # Return as tensor with batch dimension [1, 2] for compatibility
+        observation = torch.tensor([[loss_value, direction_value]], 
+                                   device=self.device, dtype=torch.float32)
         
         return observation
-    
-    def get_performance_stats(self):
+
+    def get_reward(self, baseline_loss=None):
         """
-        Get statistics about the spectral loss performance.
+        Calculate reward based on loss improvement.
+        
+        Args:
+            baseline_loss: Optional baseline to compare against
         
         Returns:
-            dict: Performance statistics
+            Negative of current loss (lower loss = higher reward)
+        """
+        if not self.ready:
+            return 0.0
+        
+        # Simple negative loss as reward
+        reward = -self.current_loss
+        
+        # Optional: compare to baseline
+        if baseline_loss is not None and self.previous_loss is not None:
+            improvement = self.previous_loss - self.current_loss
+            reward = improvement
+        
+        return reward
+
+    def get_loss_stats(self):
+        """
+        Get statistics about recent loss values.
         """
         if not self.loss_history:
             return {
-                'current_loss': self.current_loss if self.ready else float('inf'),
-                'best_loss': self.best_loss,
-                'avg_loss': float('inf'),
-                'loss_std': 0.0,
-                'data_points': 0,
-                'averaging_entries': self.averaging_entries,
-                'averaging_window': self.averaging_window_seconds
+                'current_loss': 0.0,
+                'mean_loss': 0.0,
+                'std_loss': 0.0,
+                'min_loss': 0.0,
+                'max_loss': 0.0,
+                'best_loss': float('inf'),
+                'n_samples': 0,
+                'loss_rate_hz': 0.0,
+                'averaging_entries': 0
             }
         
-        # Get recent values for averaging stats
-        num_recent = min(self.averaging_entries, len(self.loss_history))
-        recent_entries = list(self.loss_history)[-num_recent:] if num_recent > 0 else []
-        recent_losses = [entry['loss'] for entry in recent_entries] if recent_entries else []
+        recent_losses = [entry['loss'] for entry in self.loss_history]
         
         return {
             'current_loss': self.current_loss,
-            'averaged_loss': np.mean(recent_losses) if recent_losses else self.current_loss,
+            'mean_loss': float(np.mean(recent_losses)),
+            'std_loss': float(np.std(recent_losses)),
+            'min_loss': float(np.min(recent_losses)),
+            'max_loss': float(np.max(recent_losses)),
             'best_loss': self.best_loss,
-            'avg_loss': np.mean([entry['loss'] for entry in self.loss_history]),
-            'loss_std': np.std(recent_losses) if recent_losses else 0.0,
-            'data_points': len(recent_entries),
-            'total_data_points': len(self.loss_history),
-            'averaging_entries': self.averaging_entries,
-            'averaging_window': self.averaging_window_seconds
+            'n_samples': len(self.loss_history),
+            'loss_rate_hz': self.loss_rate_hz if self.loss_rate_hz else 0.0,
+            'averaging_entries': self.averaging_entries if self.averaging_entries else 0
         }
-    
+
+    def reset(self):
+        """
+        Reset the loss processor state (e.g., at episode start).
+        Clears history but keeps measured timing parameters.
+        """
+        self.loss_history.clear()
+        self.current_loss = 0.0
+        self.current_direction = 0
+        self.previous_loss = None
+        self.best_loss = float('inf')
+        self.ready = False
+        self.data_received_count = 0
+        # Keep loss_rate_hz and averaging_entries - they're valid across episodes
+        
+        logger.info("Loss processor reset - cleared history, kept timing parameters")
+
     def reset_stats(self):
         """
-        Reset the performance statistics but keep the loss calculator connection.
+        Alias for reset() - for backwards compatibility.
         """
-        self.best_loss = float('inf')
-        self.loss_history.clear()
-        self.previous_loss = None
-        # Don't reset current_loss or ready state - keep receiving data
+        self.reset()
+
+    def wait_until_ready(self, timeout=10.0):
+        """
+        Wait until the loss processor has received enough data to be ready.
         
-        logger.debug("SimpleLossProcessor stats reset")
-    
-    def get_current_loss(self):
-        """Get the current (instantaneous) loss value directly."""
-        return self.current_loss
-    
+        Args:
+            timeout: Maximum time to wait in seconds
+            
+        Returns:
+            True if ready, False if timeout
+        """
+        start_time = time.time()
+        
+        while not self.ready:
+            if time.time() - start_time > timeout:
+                logger.warning(f"Loss processor not ready after {timeout}s timeout")
+                return False
+            time.sleep(0.1)
+        
+        return True
+
+    def get_averaged_loss(self, use_robust=True):
+        """
+        Get the averaged loss value with optional robust estimation.
+        
+        Args:
+            use_robust: If True, use outlier rejection
+            
+        Returns:
+            Averaged loss value
+        """
+        if not self.loss_history:
+            return 0.0
+        
+        if self.averaging_entries is None:
+            self._update_averaging_window()
+        
+        n_avg = min(self.averaging_entries if self.averaging_entries else 10,
+                    len(self.loss_history))
+        recent_losses = [entry['loss'] for entry in list(self.loss_history)[-n_avg:]]
+        
+        if not use_robust or len(recent_losses) < 5:
+            return float(np.mean(recent_losses))
+        
+        # Robust estimation
+        losses_array = np.array(recent_losses)
+        mean_loss = np.mean(losses_array)
+        std_loss = np.std(losses_array)
+        
+        if std_loss > 0:
+            valid_mask = np.abs(losses_array - mean_loss) <= (self.outlier_rejection_threshold * std_loss)
+            if np.sum(valid_mask) > 0:
+                return float(np.mean(losses_array[valid_mask]))
+        
+        return float(np.median(losses_array))
+
     def is_ready(self):
-        """Check if the processor is ready (receiving loss data)."""
+        """Check if the loss processor is ready."""
         return self.ready
+    
+    def get_direction(self):
+        """Get the current direction indicator."""
+        return self.current_direction
+    
+    def get_current_loss_value(self):
+        """
+        Alias for get_observation() - for backwards compatibility.
+        Returns the current smoothed loss value.
+        """
+        return self.get_observation()
+    
+    def get_history_length(self):
+        """Get the number of entries in loss history."""
+        return len(self.loss_history)
