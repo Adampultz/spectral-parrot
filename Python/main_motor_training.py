@@ -241,7 +241,7 @@ def load_checkpoint(checkpoint_path: str,
     """
     logger.info(f"Loading checkpoint from {checkpoint_path}")
     
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Load configuration
     config = TrainingConfig.from_dict(checkpoint['config'])
@@ -275,7 +275,7 @@ def load_checkpoint(checkpoint_path: str,
             critic_hidden_layers=config.critic_hidden_layers,   
             use_layernorm=config.use_layernorm,                 
             dropout_rate=config.dropout_rate,                  
-            activation=config.activation_function
+            activation=config.activation_function,
         )
     
     # Load agent state
@@ -530,7 +530,8 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         per_motor_stallguard=config.per_motor_stallguard,
         motor_acceleration=config.motor_acceleration,
         motor_current_ma=config.motor_current_ma,
-        enable_stallguard=config.enable_stallguard          
+        enable_stallguard=config.enable_stallguard,
+        initial_episode=training_state.episode if resumed else 0          
     )
 
     # Create signal handlers
