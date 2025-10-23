@@ -139,7 +139,8 @@ class MotorEnvironment(gym.Env):
                 per_motor_stallguard=None,             
                 motor_acceleration=400,                
                 motor_current_ma=1200,                 
-                enable_stallguard=True):                      
+                enable_stallguard=True,
+                initial_episode=0):                      
         """
         Initialize the motor environment.
         
@@ -208,7 +209,7 @@ class MotorEnvironment(gym.Env):
         self.initial_movement_penalty = 1.0  # Strong penalty early in training
         self.final_movement_penalty = 0.1    # Weak penalty late in training
         self.penalty_decay_episodes = 50     # Episodes to decay penalty over
-        self.current_episode = 0
+        self.current_episode = initial_episode
         self.max_ep_length = max_ep_length
         
         # History tracking for sophisticated reward calculation
