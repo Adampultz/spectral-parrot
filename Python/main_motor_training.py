@@ -45,9 +45,21 @@ osc_handler = None
 
 def signal_handler(sig, frame):
     """Handle shutdown signals gracefully."""
-    global env, osc_handler
+    global env, osc_handler, loss_processor, audio
     
     logger.info("Received shutdown signal, cleaning up...")
+
+        # Pause loss processor to suppress warnings during shutdown
+    if 'loss_processor' in globals() and loss_processor is not None:  # <-- ADD THIS
+        loss_processor.pause()
+    
+    # Stop audio before closing environment
+    if 'audio' in globals() and audio is not None:  # <-- ADD THIS
+        try:
+            audio.stop()
+        except Exception as e:
+            logger.error(f"Error stopping audio: {e}")
+            
     if env is not None:
         env.close()
     if 'osc_handler' in globals():
@@ -451,6 +463,8 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         loss_history_buffer_size=config.loss_history_buffer_size
     )
 
+    loss_processor.pause() # Pause the processor immediately after creation to avoid weak signal warnings during initialization
+
     osc_handler = OSCHandler()
     
     # 3. Setup motor controller
@@ -578,6 +592,9 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     # Start audio
     logger.info("Starting audio system...")
     audio.start()
+
+    logger.info("Unpausing loss processor...")
+    loss_processor.unpause()
     
     # Wait for loss processor to be ready
     logger.info("Waiting for loss processor...")
