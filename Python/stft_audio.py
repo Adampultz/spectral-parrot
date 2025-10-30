@@ -302,6 +302,7 @@ class MultiScaleSpectralLoss:
         self.min_signal_threshold = min_signal_threshold
         self.weak_signal_penalty = weak_signal_penalty
         self.normalization_method = normalization_method
+        self.suppress_warnings = False # For avoiding weak signal messages during initialization and shutdown
 
         if use_normalized_loss:
             logger.info(f"Using normalized loss (method: {normalization_method})")
@@ -466,7 +467,8 @@ class MultiScaleSpectralLoss:
         
         # Safety check: if instrument signal is too weak, penalize heavily
         if norm_y < self.min_signal_threshold:
-            logger.warning(f"Weak signal detected: {norm_y:.4f} < {self.min_signal_threshold}")
+            if not self.suppress_warnings:
+                logger.warning(f"Weak signal detected: {norm_y:.4f} < {self.min_signal_threshold}")
             return self.weak_signal_penalty, 1
         
         if self.normalization_method == "cosine":
