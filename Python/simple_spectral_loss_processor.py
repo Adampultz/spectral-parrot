@@ -92,11 +92,13 @@ class SimpleLossProcessor:
     def pause(self):
         """Pause loss processing (e.g., during motor calibration)."""
         self.paused = True
+        self.spectral_loss_calculator.suppress_warnings = True
         logger.info("Loss processor PAUSED - weak signal warnings suppressed")
 
     def unpause(self):
         """Resume loss processing after pause."""
         self.paused = False
+        self.spectral_loss_calculator.suppress_warnings = False
         logger.info("Loss processor UNPAUSED - resuming normal operation")
         
     def _measure_loss_rate(self):
