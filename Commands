@@ -10,7 +10,7 @@ Kill process: $ kill [process id]
 If that doesn't work:
 Kill process: $ kill -9 [process id]
 
-Run the main patch: $ python main_training_with_direct_loss.py --input-device 8 --port1 /dev/cu.usbserial-0001 --port2 /dev/cu.usbserial-2
+Run the main patch: $ python main_motor_training.py --input-device 8 --port1 /dev/cu.usbserial-0001 --port2 /dev/cu.usbserial-2
 
 Position the motors:
 python position_motors.py --port1 /dev/cu.usbserial-0001 --port2 /dev/cu.usbserial-2
