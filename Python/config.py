@@ -26,8 +26,11 @@ class TrainingConfig:
     use_motors: bool = True
     manual_calibration: bool = False # Set to True if you wish to calibrate the motors prior to training. See the README file on motor positioning
     motor_speed: int = 200 
-    motor_steps: int = 25 # How many steps a motor will move per learning step
-    step_wait_time: float = 1.0 # The time in seconds between the termination of all motors and the next step. 
+    # motor_steps: int = 25 # How many steps a motor will move per learning step
+    use_variable_step_sizes = True
+    available_step_sizes = [25, 50, 75, 100]
+    step_size_logits_bias: Optional[List[float]] = None
+    step_wait_time: float = 0.5 # The time in seconds between the termination of all motors and the next step. 
     reset_wait_time: float = 2 # The time in seconds to allow the strings to settle after an episode reset (which includes motor recalibration)
     reset_calibration: int = 1  # 0: center, 1: random, 2: skip
     
@@ -87,7 +90,7 @@ class TrainingConfig:
     # Spectral Loss Normalization
     # ========================================
     use_normalized_loss: bool = True                  # Use volume-invariant normalized loss.
-    min_signal_threshold: float = 0.1                 # Minimum signal level (below = penalty)
+    min_signal_threshold: float = 0.05                 # Minimum signal level (below = penalty)
     weak_signal_penalty: float = 0.0                 # Penalty when signal too weak
     normalization_method: str = "l2"                  # "l2" (Frobenius) or "cosine"
 
@@ -99,7 +102,7 @@ class TrainingConfig:
     # ========================================
     # Reward Shaping (NEW)
     # ========================================
-    target_loss: float = 5.0                    # Baseline loss for reward calculation
+    target_loss: float = 7.0                    # Baseline loss for reward calculation
     initial_movement_penalty: float = 1.0        # Early training movement penalty
     final_movement_penalty: float = 0.1          # Late training movement penalty
     penalty_decay_episodes: int = 50             # Episodes to decay penalty over
@@ -113,8 +116,8 @@ class TrainingConfig:
     # ========================================
     # Loss Averaging (NEW)
     # ========================================
-    averaging_window_factor: float = 1.0         # Multiplier for loss averaging window
-    loss_history_buffer_size: int = 200          # Size of loss history buffer
+    averaging_window_factor: float = 0.6         # Multiplier for loss averaging window
+    loss_history_buffer_size: int = 100          # Size of loss history buffer
 
     # ========================================
     # Reward Function Components (NEW)
@@ -130,7 +133,7 @@ class TrainingConfig:
     # Reward component weights
     improvement_bonus_weight: float = 1.0        # Weight for improvement bonus
     consistency_bonus_weight: float = 5.0        # Weight for consistency bonus
-    breakthrough_bonus_weight: float = 10.0      # Weight for breakthrough bonus
+    breakthrough_bonus_weight: float = 2.0      # Weight for breakthrough bonus
     movement_penalty_weight: float = 1.0         # Weight for movement penalty
     efficiency_bonus_weight: float = 0.5         # Weight for efficiency bonus
     
@@ -141,7 +144,7 @@ class TrainingConfig:
     proximity_bonus_very_close: float = 50.0     # Bonus for very close
     
     # ========================================
-    # Episode Behavior (NEW)
+    # Episode Behavior
     # ========================================
     episode_steps_before_breakthrough: int = 30  # Min steps before breakthrough bonus
     motors_for_movement_penalty: int = 4         # Penalize if more than this many move
@@ -149,7 +152,7 @@ class TrainingConfig:
     observation_space_loss_min: float = 0.0      # Min loss for observation space
 
     # ========================================
-    # Advanced PPO Parameters (NEW)
+    # Advanced PPO Parameters
     # ========================================
     value_coef: float = 0.5                      # Value function loss coefficient
     normalize_advantages: bool = True            # Normalize advantages during training
@@ -158,13 +161,13 @@ class TrainingConfig:
     ppo_update_frequency: int = 1                # Episodes between PPO updates
     
     # ========================================
-    # Action Distribution (NEW)
+    # Action Distribution
     # ========================================
     action_hold_initial_bias: float = 2.0        # Initial bias toward HOLD action
     action_exploration_decay: bool = True        # Decay exploration over time
     
     # ========================================
-    # Episode Termination (NEW)
+    # Episode Termination
     # ========================================
     use_early_stopping: bool = True              # Enable early stopping on good loss
     use_truncation: bool = True                  # Enable truncation on stagnation
@@ -172,7 +175,7 @@ class TrainingConfig:
     reward_threshold_for_early_stop: float = None  # Stop episode if reward exceeds this
 
     # ========================================
-    # StallGuard Configuration (NEW)
+    # StallGuard Configuration
     # ========================================
     stallguard_threshold: int = 150              # Global StallGuard threshold (0-255)
     stallguard_warnings_before_stop: int = 5    # Number of warnings before emergency stop
@@ -180,7 +183,7 @@ class TrainingConfig:
     per_motor_stallguard: List[int] = field(default_factory=lambda: [150]*8)  # Per-motor SG thresholds
     
     # ========================================
-    # Motor Movement Parameters (NEW)
+    # Motor Movement Parameters
     # ========================================
     motor_acceleration: int = 400                # Motor acceleration (steps/s²)
     motor_microsteps: int = 256                  # Microstepping (1, 2, 4, 8, 16, 32, 64, 128, 256)
@@ -188,7 +191,7 @@ class TrainingConfig:
     enable_spreadcycle: bool = False             # false=StealthChop, true=SpreadCycle
     
     # ========================================
-    # Motor Safety (NEW)
+    # Motor Safety
     # ========================================
     enable_stallguard: bool = True               # Enable StallGuard detection
     motor_timeout_seconds: float = 60.0          # Max time for any single movement
@@ -196,13 +199,13 @@ class TrainingConfig:
     stall_count_before_disable: int = 5          # Stalls before auto-disable
 
     # ========================================
-    # STFT and Audio Processing (NEW)
+    # STFT and Audio Processing
     # ========================================
     stft_scales: List[int] = field(default_factory=lambda: [512, 1024, 2048, 4096])  # STFT window sizes
     stft_window_type: str = "hann"               # Window function: hann, hamming, blackman
     stft_hop_divisor: int = 4                    # Hop length = window_size / hop_divisor
     use_pyfftw: bool = True                      # Use pyFFTW for faster FFT
-    fft_threads: int = 2                         # Number of FFT threads
+    fft_threads: int = 4                         # Number of FFT threads
     
     # ========================================
     # Network Architecture Details (NEW)
@@ -220,6 +223,7 @@ class TrainingConfig:
     motor_completion_timeout: float = 30.0       # Motor completion wait timeout (seconds)
     stabilization_time: float = 2.0              # Wait after motor movement (seconds)
     loss_clip_max: float = 50.0                  # Maximum loss value clipping
+    outlier_rejection_threshold: float = 3.0
 
      # ========================================
     # Memory Management (NEW)
@@ -249,10 +253,10 @@ class TrainingConfig:
     input_device: Optional[int] = None
     sample_rate: int = 48000
     channels: int = 2
-    buffer_size: int = 1024
+    buffer_size: int = 4096
     
     # ========================================
-    # Per-Motor Configuration (NEW)
+    # Per-Motor Configuration
     # ========================================
     enable_per_motor_settings: bool = False      # Use per-motor speed/step overrides
     per_motor_speeds: List[int] = field(default_factory=lambda: [200]*8)      # Speed per motor
@@ -260,7 +264,7 @@ class TrainingConfig:
     per_motor_enabled: List[bool] = field(default_factory=lambda: [True]*8)   # Enable/disable motors
     
     # ========================================
-    # Logging Control (NEW)
+    # Logging Control
     # ========================================
     log_level: str = "INFO"                      # Logging level: DEBUG, INFO, WARNING, ERROR
     log_motor_details: bool = True              # Log detailed motor movements
@@ -302,7 +306,12 @@ class TrainingConfig:
     log_dir: str = "./logs"                      # Base directory for logs
     log_to_master: bool = False                   # Also log to master.log
     log_filename_format: str = "{timestamp}_{experiment}_ep{episode}.log"  # Format for log files
-    
+
+    # ========================================
+    # Training data management
+    # ========================================
+    training_audio_rotation_interval: int = 10  # Change audio every N episodes (0 = disabled)
+    training_audio_folder: str = "/Users/adammac2023/Documents/Musik-business/Projects/Spectral Parrot/Audio/Recordings/Nov_2025/Oct_29th/Renders"    
     # ========================================
     # Helper Methods
     # ========================================
@@ -364,6 +373,19 @@ class TrainingConfig:
             print(f"Config file not found at {path}, using defaults")
             return cls()
     
+    def get_num_actions_per_motor(self) -> int:
+        """Calculate number of discrete actions per motor based on configuration."""
+        if self.use_variable_step_sizes:
+            # 2N + 1 actions: N for CCW, 1 for HOLD, N for CW
+            return 2 * len(self.available_step_sizes) + 1
+        else:
+            # Legacy: 3 actions (CCW, HOLD, CW)
+            return 3
+
+    def get_hold_action_index(self) -> int:
+        """Get the action index for HOLD."""
+        return len(self.available_step_sizes)
+        
     def print_summary(self):
         """Print a summary of the current configuration."""
         print("\n" + "="*60)
@@ -378,7 +400,7 @@ class TrainingConfig:
         print("\n[Motor Control]")
         print(f"  Use motors: {self.use_motors}")
         print(f"  Speed: {self.motor_speed}, Reset speed: {self.motor_speed}")
-        print(f"  Steps per action: {self.motor_steps}")
+        print(f"  Steps per action: {self.per_motor_steps}")
         print(f"  Step wait time: {self.step_wait_time}s")
         print(f"  Reset calibration mode: {self.reset_calibration}")
         
