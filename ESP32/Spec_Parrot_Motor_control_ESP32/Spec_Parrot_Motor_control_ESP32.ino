@@ -58,7 +58,7 @@
               // Add basic StallGuard variables - only these are new
               uint16_t stallGuardResult[NUM_MOTORS] = {0, 0, 0, 0};
               int sgThreshold = 150;  // Default StallGuard threshold (0-255)
-              int sG_numWarnings = 10;
+              int sG_numWarnings = 5;
 
               // Create stepper and driver objects - all using the same SERIAL_PORT but different addresses
               TMC2209Stepper* drivers[NUM_MOTORS];
