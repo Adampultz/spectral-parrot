@@ -41,6 +41,80 @@ class OSCHandler:
         
         # Callback storage
         self.callbacks = []
+
+        self.audio_loaded = False
+        self.num_training_audios = 0
+        self.current_audio_index = 0 
+        self.audio_switch_confirmed = False
+        self.audio_load_error = None
+        
+        # Add OSC message handlers
+        self.disp.map("/training_audio_loaded", self._handle_audio_loaded)
+        self.disp.map("/training_audio_switched", self._handle_audio_switched)
+        self.disp.map("/num_training_audios", self._handle_num_audios)
+
+    def load_training_audio_folder(self, folder_path: str, rotation_count: int = 0):
+        """Send folder path to SuperCollider to load all audio files"""
+        logger.info(f"Sending training audio folder to SuperCollider: {folder_path}")
+        logger.info(f"Rotation count: {rotation_count}")
+        self.audio_loaded = False
+        self.audio_load_error = None
+        self.client.send_message("/load_training_audio_path", [folder_path, rotation_count])
+    
+    def switch_training_audio(self, buffer_index: int):
+        """Switch to a specific buffer index"""
+        logger.info(f"Switching to training audio buffer #{buffer_index}")
+        self.audio_switch_confirmed = False
+        self.client.send_message("/switch_training_audio", buffer_index)
+    
+    def get_num_training_audios(self):
+        """Query number of loaded buffers"""
+        self.client.send_message("/get_num_training_audios", 1)
+    
+    def wait_for_audio_load(self, timeout: float = 10.0) -> bool:
+        """Wait for audio files to finish loading"""
+        start_time = time.time()
+        while not self.audio_loaded and (time.time() - start_time) < timeout:
+            if self.audio_load_error:
+                logger.error(f"Audio loading failed: {self.audio_load_error}")
+                return False
+            time.sleep(0.1)
+        return self.audio_loaded
+    
+    def wait_for_audio_switch(self, timeout: float = 2.0) -> bool:
+        """Wait for confirmation that audio has been switched"""
+        start_time = time.time()
+        while not self.audio_switch_confirmed and (time.time() - start_time) < timeout:
+            time.sleep(0.05)
+        return self.audio_switch_confirmed
+    
+    # Handler methods
+    def _handle_audio_loaded(self, address, num_buffers, start_index, status):
+        """Handle confirmation of audio loading"""
+        if status == "success":
+            self.audio_loaded = True
+            self.num_training_audios = num_buffers
+            self.current_audio_index = start_index
+            logger.info(f"✓ SuperCollider loaded {num_buffers} audio buffers")
+            logger.info(f"✓ Starting at buffer index {start_index}")
+        else:
+            self.audio_loaded = False
+            self.audio_load_error = status
+            logger.error(f"✗ Audio loading failed: {status}")
+    
+    def _handle_audio_switched(self, address, index, success, message):
+        """Handle confirmation of audio buffer switch"""
+        if success == 1:
+            self.audio_switch_confirmed = True
+            logger.info(f"✓ Audio switch confirmed: buffer #{index}")
+        else:
+            self.audio_switch_confirmed = False
+            logger.error(f"✗ Audio switch failed for buffer #{index}: {message}")
+    
+    def _handle_num_audios(self, address, count):
+        """Handle response with number of loaded audio buffers"""
+        self.num_training_audios = count
+        logger.info(f"SuperCollider has {count} training audio buffers loaded")
     
     def register_callback(self, callback):
         """Register a callback function that will be called with new data"""
@@ -75,10 +149,6 @@ class OSCHandler:
         self.server_thread = threading.Thread(target=self.server.serve_forever)
         self.server_thread.daemon = True
         self.server_thread.start()
-        
-        # Send initial trigger to start SuperCollider analysis
-        logger.info("Sending initial trigger to SuperCollider")
-        self.client.send_message("/osc_from_python", True)
     
     def stop_sc_analysis(self):
         """Send a message to stop the SuperCollider analysis"""

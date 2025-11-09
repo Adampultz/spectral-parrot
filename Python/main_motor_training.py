@@ -460,7 +460,8 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         step_wait_time=config.step_wait_time,
         loss_clip_max=config.loss_clip_max,
         averaging_window_factor=config.averaging_window_factor,
-        loss_history_buffer_size=config.loss_history_buffer_size
+        loss_history_buffer_size=config.loss_history_buffer_size,
+        outlier_rejection_threshold=config.outlier_rejection_threshold
     )
 
     loss_processor.pause() # Pause the processor immediately after creation to avoid weak signal warnings during initialization
@@ -610,9 +611,84 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     
     # 6. Training loop (continuing from checkpoint if loaded)
     logger.info(f"Starting/Resuming training from episode {training_state.episode + 1}...")
-    
+
+    # ============================================================================
+    # AUDIO ROTATION SETUP - Send folder path to SuperCollider for buffer loading
+    # ============================================================================
+    num_training_audios = 0
+    current_audio_index = 0
+
+    if config.training_audio_rotation_interval > 0:
+        audio_folder = config.training_audio_folder
+
+        # Calculate rotation count - SuperCollider will do the modulo
+        rotation_count = training_state.episode // config.training_audio_rotation_interval
+        
+        logger.info(f"Loading training audio from folder: {audio_folder}")
+        logger.info(f"Current episode: {training_state.episode}, Rotation interval: {config.training_audio_rotation_interval}")
+        logger.info(f"Calculated rotation count: {rotation_count}")
+
+        # Send folder path and rotation count to SuperCollider
+        # SuperCollider will count files and calculate: starting_index = rotation_count % num_files
+        osc_handler.load_training_audio_folder(audio_folder, rotation_count=rotation_count)       
+        
+        # Wait for SuperCollider to load all buffers
+        logger.info("Waiting for SuperCollider to load training audio buffers...")
+        if not osc_handler.wait_for_audio_load(timeout=15.0):
+            logger.error("Failed to load training audio files! Check SuperCollider post window for errors.")
+            logger.warning("Continuing with audio rotation disabled.")
+            config.training_audio_rotation_interval = 0
+        else:
+            num_training_audios = osc_handler.num_training_audios
+            current_audio_index = osc_handler.current_audio_index  # Get from SC, don't recalculate!
+            
+            logger.info(f"✓ Successfully loaded {num_training_audios} audio files")
+            
+            if num_training_audios > 0:
+                logger.info(f"Will rotate audio every {config.training_audio_rotation_interval} episodes")
+                logger.info(f"")
+                logger.info(f"{'='*70}")
+                logger.info(f"AUDIO ROTATION INITIALIZED")
+                if training_state.episode > 0:
+                    logger.info(f"Resumed at episode {training_state.episode}")
+                logger.info(f"Starting with buffer #{current_audio_index + 1}/{num_training_audios}")
+                logger.info(f"{'='*70}")
+                logger.info(f"")
+                logger.info("Starting SuperCollider synths...")
+                osc_handler.client.send_message("/osc_from_python", True)
+                time.sleep(0.5)  # Give SC time to start
+            else:
+                logger.warning("No audio files loaded. Audio rotation disabled.")
+                config.training_audio_rotation_interval = 0
+    else:
+        logger.info("Audio rotation disabled (training_audio_rotation_interval = 0)")
+
+        
     while training_state.timesteps < config.total_timesteps:
         training_state.episode += 1
+
+        if (config.training_audio_rotation_interval > 0 and 
+            num_training_audios > 0 and
+            training_state.episode % config.training_audio_rotation_interval == 0):
+            
+             # Calculate next buffer index (wraps around)
+            current_audio_index = (current_audio_index + 1) % num_training_audios
+            
+            logger.info(f"")
+            logger.info(f"{'='*70}")
+            logger.info(f"ROTATING TRAINING AUDIO")
+            logger.info(f"Episode {training_state.episode}: Switching to buffer #{current_audio_index + 1}/{num_training_audios}")
+            logger.info(f"{'='*70}")
+            
+            # Switch to the next buffer
+            osc_handler.switch_training_audio(current_audio_index)
+            
+            # Wait for confirmation
+            if osc_handler.wait_for_audio_switch(timeout=2.0):
+                logger.info("✓ Audio rotation successful")
+            else:
+                logger.warning("⚠️ Audio rotation timeout - continuing anyway")
+
         obs, _ = env.reset()
         
         episode_reward = 0
