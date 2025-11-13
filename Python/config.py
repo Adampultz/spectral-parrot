@@ -27,7 +27,7 @@ class TrainingConfig:
     manual_calibration: bool = False # Set to True if you wish to calibrate the motors prior to training. See the README file on motor positioning
     motor_speed: int = 200 
     # motor_steps: int = 25 # How many steps a motor will move per learning step
-    use_variable_step_sizes = True
+    use_variable_step_sizes = False
     available_step_sizes = [25, 50, 75, 100]
     step_size_logits_bias: Optional[List[float]] = None
     step_wait_time: float = 0.5 # The time in seconds between the termination of all motors and the next step. 
@@ -37,12 +37,16 @@ class TrainingConfig:
     # Motor position limits (per motor)
     # Maximum steps in each direction from the center. cw should correspond to when the tuner hits its mechanical limit, while ccw is set as the limit 
     # beyond which strings get too slack to vibrate.
-    max_ccw_steps: List[int] = field(default_factory=lambda: [4000, 4000, 4000, 4000, 5000, 5000, 5000, 5000])
+    max_ccw_steps: List[int] = field(default_factory=lambda: [4000, 4000, 4000, 4000, 4500, 4500, 4500, 4500])
     max_cw_steps: List[int] = field(default_factory=lambda: [4500, 4500, 4500, 4500, 4500, 4500, 4500, 4500])
     danger_zone_ratio: float = 0.1               # Start penalties at 10% from limit
     critical_zone_ratio: float = 0.02            # Severe penalties at 2% from limit
     ccw_safety_margin: int = 200                 # Safety margin before CCW limit
     limit_penalty: float = 0.0                  # Penalty for hitting limit
+
+    min_step_size: int = 10
+    max_step_size: int = 100
+    step_size_bias: float = 1.3
 
     # ========================================
     # PPO Hyperparameters
@@ -72,6 +76,7 @@ class TrainingConfig:
     lr_schedule_warmup_steps: int = 1000         # Warmup steps for LR schedule
     lr_schedule_total_steps: int = 100000        # Total steps for LR schedule
     gradient_accumulation_steps: int = 1         # Accumulate gradients over N steps
+    use_gated_continuous: bool = True            # Use continuous motor step sizes
     
     # ========================================
     # Learning Rate Schedule (NEW)
@@ -84,13 +89,13 @@ class TrainingConfig:
     # Network Architecture
     # ========================================
     hidden_size: int = 64
-    hold_bias: float = 2.0 # The higher the value, the more prone the network is to turn fewer motors
+    hold_bias: float = 0.4 # The higher the value, the more prone the network is to turn fewer motors
     
     # ========================================
     # Spectral Loss Normalization
     # ========================================
     use_normalized_loss: bool = True                  # Use volume-invariant normalized loss.
-    min_signal_threshold: float = 0.05                 # Minimum signal level (below = penalty)
+    min_signal_threshold: float = 0.0                 # Minimum signal level (below = penalty)
     weak_signal_penalty: float = 0.0                 # Penalty when signal too weak
     normalization_method: str = "l2"                  # "l2" (Frobenius) or "cosine"
 
@@ -103,8 +108,8 @@ class TrainingConfig:
     # Reward Shaping (NEW)
     # ========================================
     target_loss: float = 7.0                    # Baseline loss for reward calculation
-    initial_movement_penalty: float = 1.0        # Early training movement penalty
-    final_movement_penalty: float = 0.1          # Late training movement penalty
+    initial_movement_penalty: float = 0.0        # Early training movement penalty
+    final_movement_penalty: float = 0.0          # Late training movement penalty
     penalty_decay_episodes: int = 50             # Episodes to decay penalty over
     
     # ========================================

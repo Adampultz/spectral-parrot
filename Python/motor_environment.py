@@ -363,6 +363,46 @@ class MotorEnvironment(gym.Env):
             step_size = self.available_step_sizes[step_size_idx]
         
         return direction, step_size
+    
+    def _decode_hybrid_action(self, direction_idx: int, magnitude: float, 
+                           min_steps: int, max_steps: int) -> Tuple[int, int]:
+        # Map direction index to direction value
+        direction_map = {0: -1, 1: 0, 2: 1}
+        direction = direction_map[direction_idx]
+        
+        # If HOLD, step size is 0
+        if direction == 0:
+            return 0, 0
+        
+        # Scale magnitude to [min_steps, max_steps] and round to integer
+        step_size = int(min_steps + magnitude * (max_steps - min_steps))
+        step_size = max(min_steps, min(max_steps, step_size))
+                
+        return direction, step_size
+    
+    def interpret_continuous_action(self, continuous_action):
+        """
+        Convert continuous action value to motor command.
+        
+        Args:
+            continuous_action: Single motor's action value
+                0 = hold
+                (0, 1] = CW movement  
+                [-1, 0) = CCW movement
+        
+        Returns:
+            Tuple of (direction, steps) where direction is -1/0/1
+        """
+        if abs(continuous_action) < 0.0001:  # HOLD
+            return 0, 0
+        elif continuous_action > 0:  # CW
+            magnitude = (continuous_action - 0.001) / 0.999
+            steps = int(5 + magnitude * 95)  # 5-100 steps
+            return 1, min(steps, 100)
+        else:  # CCW
+            magnitude = (abs(continuous_action) - 0.001) / 0.999
+            steps = int(5 + magnitude * 95)  # 5-100 steps
+            return -1, min(steps, 100)
 
     def _get_adaptive_movement_penalty(self):
         """Calculate current movement penalty based on training progress."""
@@ -536,12 +576,17 @@ class MotorEnvironment(gym.Env):
         
         return stats
     
-    def step(self, actions):
+    def step(self, actions, magnitudes=None, min_steps=10, max_steps=100):
         """
         Execute one environment step with variable step sizes.
         
         Args:
-            actions: Array of motor action indices [num_motors]
+            actions: Either:
+                - Array of motor action indices [num_motors] for discrete mode
+                - Array of direction indices [num_motors] for hybrid mode (when magnitudes provided)
+            magnitudes: Optional array of continuous magnitudes [0, 1] for hybrid mode
+            min_steps: Minimum step size for continuous magnitudes
+            max_steps: Maximum step size for continuous magnitudes
                     
         Returns:
             observation, reward, terminated, truncated, info
@@ -550,6 +595,11 @@ class MotorEnvironment(gym.Env):
         
         if len(actions) != self.num_motors:
             raise ValueError(f"Expected {self.num_motors} actions, got {len(actions)}")
+        
+        # Detect hybrid mode (continuous magnitudes)
+        use_hybrid = magnitudes is not None
+        if use_hybrid and len(magnitudes) != self.num_motors:
+            raise ValueError(f"Expected {self.num_motors} magnitudes, got {len(magnitudes)}")
         
         motors_moving = set()
         movement_commands = {}
@@ -564,8 +614,17 @@ class MotorEnvironment(gym.Env):
             current_pos = self.motor_positions[i]
             
             # Decode action to get direction and step size
-            action_idx = int(action)
-            direction, step_size = self._decode_action(action_idx)
+            if use_hybrid:
+                # Hybrid mode: direction index + continuous magnitude
+                direction_idx = int(action)
+                magnitude = float(magnitudes[i])
+                direction, step_size = self._decode_hybrid_action(
+                    direction_idx, magnitude, min_steps, max_steps
+                )
+            else:
+                # Discrete mode: action index maps to direction + fixed step size
+                action_idx = int(action)
+                direction, step_size = self._decode_action(action_idx)
             
             soft_penalty = self.limit_handler.get_limit_penalty(i, current_pos)
             if soft_penalty > 0:
@@ -689,7 +748,7 @@ class MotorEnvironment(gym.Env):
             'best_loss': self.best_loss,
             'steps_without_improvement': self.steps_without_improvement,
             'motors_moved': list(motors_moving),
-            'movement_details': movement_details if self.use_variable_step_sizes else {},
+            'movement_details': movement_details if (self.use_variable_step_sizes or use_hybrid) else {},
             'motor_positions': self.motor_positions.copy(),
             'limit_violations': self.limit_violations.copy(),
             'episode_steps': self.episode_steps,
@@ -698,6 +757,104 @@ class MotorEnvironment(gym.Env):
         }
         
         return observation, reward, terminated, truncated, info
+    
+    # def step_continuous(self, continuous_actions):
+    #     """
+    #     Execute a step with continuous actions from the gated policy.
+        
+    #     Args:
+    #         continuous_actions: Array of 8 values where:
+    #                         0 = hold
+    #                         (0, 1] = CW movement
+    #                         [-1, 0) = CCW movement
+        
+    #     Returns:
+    #         observation, reward, done, info
+    #     """
+    #     if self.done:
+    #         raise ValueError("Environment is done. Please reset.")
+        
+    #     # Convert continuous actions to motor commands
+    #     motor_commands = []
+    #     motors_moved = []
+        
+    #     for motor_id, action_value in enumerate(continuous_actions):
+    #         action_value = float(action_value)  # Convert from tensor if needed
+            
+    #         # Check if holding (exact zero or very close)
+    #         if abs(action_value) < 0.0001:
+    #             continue  # Motor holds, no command needed
+            
+    #         # Determine direction and magnitude
+    #         if action_value > 0:  # CW movement
+    #             # Map from [0.001, 1.0] to [min_steps, max_steps]
+    #             magnitude = (action_value - 0.001) / 0.999
+    #             steps = int(self.min_steps + magnitude * (self.max_steps - self.min_steps))
+    #             steps = min(steps, self.max_steps)  # Safety clamp
+    #             direction = 1
+    #             motors_moved.append(f"{motor_id+1}:CW{steps}")
+                
+    #         else:  # CCW movement  
+    #             # Map from [-1.0, -0.001] to [max_steps, min_steps]
+    #             magnitude = (abs(action_value) - 0.001) / 0.999
+    #             steps = int(self.min_steps + magnitude * (self.max_steps - self.min_steps))
+    #             steps = min(steps, self.max_steps)  # Safety clamp
+    #             direction = -1
+    #             motors_moved.append(f"{motor_id+1}:CCW{steps}")
+            
+    #         # Check position limits
+    #         new_position = self.motor_positions[motor_id] + (direction * steps)
+            
+    #         if new_position > self.position_limit:
+    #             self.logger.warning(f"Motor {motor_id+1} blocked at CW limit "
+    #                             f"(pos: {self.motor_positions[motor_id]} → {new_position}, "
+    #                             f"limit: {self.position_limit})")
+    #             continue
+    #         elif new_position < -self.position_limit:
+    #             self.logger.warning(f"Motor {motor_id+1} blocked at CCW limit "
+    #                             f"(pos: {self.motor_positions[motor_id]} → {new_position}, "
+    #                             f"limit: {-self.position_limit})")
+    #             continue
+            
+    #         # Add to command list
+    #         motor_commands.append({
+    #             'motor_id': motor_id + 1,
+    #             'direction': direction,
+    #             'steps': steps
+    #         })
+            
+    #         # Update internal position tracking
+    #         self.motor_positions[motor_id] = new_position
+        
+    #     # Execute the motor commands (same as before)
+    #     if motor_commands:
+    #         self._execute_motor_commands(motor_commands)
+        
+    #     # Wait for step completion
+    #     time.sleep(self.step_wait_time)
+        
+    #     # Get new observation and calculate reward
+    #     self.current_loss = self.get_current_loss()
+    #     observation = self._get_observation()
+    #     reward = self._calculate_reward(len(motor_commands))
+        
+    #     # Update step counter
+    #     self.current_step += 1
+        
+    #     # Check if episode is done
+    #     if self.current_step >= self.max_episode_length:
+    #         self.done = True
+    #         self.logger.info(f"Max episode length reached: {self.max_episode_length}")
+        
+    #     # Create info dict
+    #     info = {
+    #         'loss': self.current_loss,
+    #         'motors_moved': motors_moved,
+    #         'step': self.current_step,
+    #         'motor_positions': self.motor_positions.copy()
+    #     }
+        
+    #     return observation, reward, self.done, info
 
     
     def _get_observation(self) -> np.ndarray:

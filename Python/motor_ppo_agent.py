@@ -1,11 +1,8 @@
-# motor_ppo_agent.py - Simplified PPO agent for motor control
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import logging
-from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -13,17 +10,19 @@ class MotorPPOMemory:
     """Simplified memory buffer for motor-only actions."""
     def __init__(self, batch_size):
         self.states = []
-        self.actions = []  # Just motor actions now
+        self.directions = []  # Discrete direction choices
+        self.magnitudes = []  # Continuous magnitude values
         self.log_probs = []
         self.rewards = []
         self.values = []
         self.dones = []
         self.batch_size = batch_size
         
-    def store(self, state, actions, log_prob, reward, value, done):
+    def store(self, state, directions, magnitudes, log_prob, reward, value, done):
         """Store a transition in memory."""
         self.states.append(state)
-        self.actions.append(actions)
+        self.directions.append(directions)
+        self.magnitudes.append(magnitudes)
         self.log_probs.append(log_prob)
         self.rewards.append(reward)
         self.values.append(value)
@@ -32,7 +31,8 @@ class MotorPPOMemory:
     def clear(self):
         """Clear memory after update."""
         self.states = []
-        self.actions = []
+        self.directions = []
+        self.magnitudes = []
         self.log_probs = []
         self.rewards = []
         self.values = []
@@ -48,25 +48,39 @@ class MotorPPOMemory:
         return batches
 
 class MotorPPOAgent:
-    """
-    Simplified PPO agent for motor control.
-    Only handles discrete actions for motors.
-    """
-    def __init__(self, state_dim, num_motors, num_actions_per_motor, step_size_logits_bias, 
+
+    def __init__(self, 
+                 state_dim, 
+                 num_motors, 
+                 num_actions_per_motor, 
+                 step_size_logits_bias, 
                  device='cpu', 
-                 hidden_size=64, lr_actor=3e-4, lr_critic=3e-4,
-                 gamma=0.99, gae_lambda=0.95, clip_param=0.2,
-                 value_coef=0.5, entropy_coef=0.01, max_grad_norm=0.5,
-                 batch_size=64, hold_bias=0.5, initial_temperature=2.0,
+                 hidden_size=64, 
+                 lr_actor=3e-4, 
+                 lr_critic=3e-4,
+                 gamma=0.99, 
+                 gae_lambda=0.95, 
+                 clip_param=0.2,
+                 value_coef=0.5, 
+                 entropy_coef=0.01, 
+                 max_grad_norm=0.5,
+                 batch_size=64, 
+                 hold_bias=0.5, 
+                 initial_temperature=2.0,
                  temperature_decay=0.998,
                  min_temperature=0.3, 
                  normalize_advantages=True,   
                  normalize_returns=False,         
-                 use_gae=True, actor_hidden_layers=[64, 64],     
+                 use_gae=True, 
+                 actor_hidden_layers=[64, 64],     
                  critic_hidden_layers=[64, 64],   
                  use_layernorm=True,              
                  dropout_rate=0.1,               
-                 activation='relu'):
+                 activation='relu',
+                 min_step_size=10,
+                 max_step_size=100,
+                 magnitude_loss_coef=0.1,
+                 step_size_bias=1.5):
         
         """Initialize the motor PPO agent."""
         self.device = device
@@ -82,6 +96,10 @@ class MotorPPOAgent:
         self.temperature_decay = temperature_decay
         self.min_temperature = min_temperature
         self.current_temperature = initial_temperature
+        self.min_step_size = min_step_size
+        self.max_step_size = max_step_size
+        self.magnitude_loss_coef = magnitude_loss_coef
+        self.step_size_bias=step_size_bias
         
         # Import the motor actor network
         from motor_actor_network import MotorActorNetwork
@@ -96,7 +114,10 @@ class MotorPPOAgent:
             dropout_rate=dropout_rate,
             hold_bias=hold_bias,
             step_size_logits_bias=step_size_logits_bias,
-            activation=activation
+            activation=activation,
+            min_step_size=min_step_size,
+            max_step_size=max_step_size,
+            step_size_bias=step_size_bias,
         ).to(device)
 
         # Build critic from layer sizes
@@ -137,36 +158,40 @@ class MotorPPOAgent:
         self.use_gae = use_gae
         
     def select_action(self, state):
-        """
-        Select motor actions according to the policy.
-        
-        Args:
-            state: Current state
+            """
+            Select motor actions according to the policy.
             
-        Returns:
-            actions: Array of motor actions (0=CCW, 1=HOLD, 2=CW)
-            log_prob: Log probability of the actions
-            value: Estimated value of the state
-        """
-        state_tensor = torch.FloatTensor(state).to(self.device)
+            Args:
+                state: Current state
+                
+            Returns:
+                motor_commands: Array of actual motor step commands
+                directions: Array of direction actions (0=CCW, 1=HOLD, 2=CW)
+                magnitudes: Array of raw magnitude values [0, 1]
+                log_prob: Log probability of the direction actions
+                value: Estimated value of the state
+            """
+            state_tensor = torch.FloatTensor(state).to(self.device)
 
-        with torch.no_grad():
-            # Get actions from actor
-            actions, log_prob = self.actor.sample(state_tensor)
+            with torch.no_grad():
+                # Get hybrid actions from actor
+                motor_commands, directions, magnitudes, log_prob = self.actor.sample(state_tensor)
+                
+                # Get value from critic
+                value = self.critic(state_tensor).squeeze()
+
+            # Convert to numpy
+            motor_commands_np = motor_commands.cpu().numpy().squeeze()
+            directions_np = directions.cpu().numpy().squeeze()
+            magnitudes_np = magnitudes.cpu().numpy().squeeze()
+            log_prob_np = log_prob.cpu().item()
+            value_np = value.cpu().item()
             
-            # Get value from critic
-            value = self.critic(state_tensor).squeeze()
-            
-        # Convert to numpy
-        actions_np = actions.cpu().numpy().squeeze()
-        log_prob_np = log_prob.cpu().item()
-        value_np = value.cpu().item()
-        
-        return actions_np, log_prob_np, value_np
+            return motor_commands_np, directions_np, magnitudes_np, log_prob_np, value_np
     
-    def store_transition(self, state, actions, log_prob, reward, value, done):
+    def store_transition(self, state, directions, magnitudes, log_prob, reward, value, done):
         """Store a transition in memory."""
-        self.memory.store(state, actions, log_prob, reward, value, done)
+        self.memory.store(state, directions, magnitudes, log_prob, reward, value, done)
     
     def update(self, next_value, n_epochs=10):
         """
@@ -198,9 +223,10 @@ class MotorPPOAgent:
         
         # Convert to tensors
         states = torch.FloatTensor(np.array(self.memory.states)).to(self.device)
-        actions = torch.LongTensor(np.array(self.memory.actions)).to(self.device)
+        directions = torch.LongTensor(np.array(self.memory.directions)).to(self.device)
+        magnitudes = torch.FloatTensor(np.array(self.memory.magnitudes)).to(self.device)
         old_log_probs = torch.FloatTensor(np.array(self.memory.log_probs)).to(self.device)
-        old_values = torch.FloatTensor(np.array(self.memory.values)).to(self.device)  # NEW!
+        old_values = torch.FloatTensor(np.array(self.memory.values)).to(self.device)
         returns = torch.FloatTensor(returns).to(self.device)
         
         # Update for multiple epochs
@@ -213,13 +239,14 @@ class MotorPPOAgent:
             for batch_indices in batches:
                 # Get batch data
                 batch_states = states[batch_indices]
-                batch_actions = actions[batch_indices]
+                batch_directions = directions[batch_indices]
+                batch_magnitudes = magnitudes[batch_indices]
                 batch_old_log_probs = old_log_probs[batch_indices]
                 batch_old_values = old_values[batch_indices]
                 batch_returns = returns[batch_indices]
                 
                 # Evaluate actions
-                new_log_probs, entropy = self.actor.evaluate(batch_states, batch_actions)
+                new_log_probs, entropy = self.actor.evaluate(batch_states, batch_directions, batch_magnitudes)
                 state_values = self.critic(batch_states).squeeze()
                 
                 # Compute advantages
@@ -229,10 +256,11 @@ class MotorPPOAgent:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
                 
                 # PPO loss
+                # PPO loss for directions
                 ratio = torch.exp(new_log_probs - batch_old_log_probs)
                 surr1 = ratio * advantages
                 surr2 = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * advantages
-                actor_loss = -torch.min(surr1, surr2).mean()
+                direction_loss = -torch.min(surr1, surr2).mean()
                 
                 # Value Loss
                 # Compute clipped predictions
@@ -253,7 +281,8 @@ class MotorPPOAgent:
                 entropy_loss = -entropy.mean()
                 
                 # Total loss
-                total_actor_loss = actor_loss + self.entropy_coef * entropy_loss
+                total_actor_loss = direction_loss + self.entropy_coef * entropy_loss
+
                 total_critic_loss = self.value_coef * value_loss
                 
                 # Update networks
@@ -268,7 +297,7 @@ class MotorPPOAgent:
                 self.critic_optimizer.step()
                 
                 # Record losses
-                actor_losses.append(actor_loss.item())
+                actor_losses.append(direction_loss.item())
                 critic_losses.append(value_loss.item())
         
         # Clear memory

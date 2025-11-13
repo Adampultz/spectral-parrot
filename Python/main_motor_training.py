@@ -9,15 +9,15 @@ import matplotlib.pyplot as plt
 import os
 import signal
 import json
-# import pickle
 import gc
 from dataclasses import dataclass, asdict, field
-from typing import Optional, List, Dict, Any
-from pythonosc import udp_client
+from typing import Optional
 from datetime import datetime
 from collections import deque
 from config import TrainingConfig
 from save_session_hyperparameters import save_session_hyperparameters
+from string_change_manager import StringChangeManager
+from string_change_interactive_control import InteractiveController
 
 
 # Setup logging
@@ -288,6 +288,9 @@ def load_checkpoint(checkpoint_path: str,
             use_layernorm=config.use_layernorm,                 
             dropout_rate=config.dropout_rate,                  
             activation=config.activation_function,
+            min_step_size=config.min_step_size,
+            max_step_size=config.max_step_size,
+            step_size_bias=config.step_size_bias
         )
     
     # Load agent state
@@ -549,6 +552,19 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         initial_episode=training_state.episode if resumed else 0          
     )
 
+    string_change_manager = StringChangeManager(
+        motor_controller=motor_controller,
+        environment=env,
+        loss_processor=loss_processor,
+        agent=None  # Will be set after agent creation
+    )
+
+    # Create interactive controller
+    # interactive_controller = InteractiveController(string_change_manager)
+    # interactive_controller.start()
+    
+    logger.info("String change manager initialized - press 'h' for help")
+
     # Create signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -583,7 +599,10 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             critic_hidden_layers=config.critic_hidden_layers,   
             use_layernorm=config.use_layernorm,                 
             dropout_rate=config.dropout_rate,                  
-            activation=config.activation_function            
+            activation=config.activation_function,
+            min_step_size=config.min_step_size,
+            max_step_size=config.max_step_size,
+            step_size_bias=config.step_size_bias            
         )
 
     # Start OSC server
@@ -670,8 +689,13 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         if (config.training_audio_rotation_interval > 0 and 
             num_training_audios > 0 and
             training_state.episode % config.training_audio_rotation_interval == 0):
-            
-             # Calculate next buffer index (wraps around)
+
+            if string_change_manager.training_paused:
+                # Don't advance training, but keep audio active
+                time.sleep(0.1)
+                continue
+                
+            # Calculate next buffer index (wraps around)
             current_audio_index = (current_audio_index + 1) % num_training_audios
             
             logger.info(f"")
@@ -695,17 +719,26 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         episode_loss_sum = 0
         
         for step in range(config.max_ep_length):
-            # Select action
-            actions, log_prob, value = agent.select_action(obs)
+            # Select action - unpack all 5 values from hybrid actor
+            motor_commands, directions, magnitudes, log_prob, value = agent.select_action(obs)
+
+            while string_change_manager and string_change_manager.training_paused:
+                time.sleep(0.1)
+                continue
             
-            # Take action
-            next_obs, reward, terminated, truncated, info = env.step(actions)
+            # Pass DIRECTIONS and MAGNITUDES to environment for hybrid mode
+            next_obs, reward, terminated, truncated, info = env.step(
+                directions, 
+                magnitudes=magnitudes,
+                min_steps=config.min_step_size,
+                max_steps=config.max_step_size
+            )
 
             if 'recommended_hold_bias' in info:
                 agent.actor.hold_bias = info['recommended_hold_bias']
             
-            # Store transition
-            agent.store_transition(obs, actions, log_prob, reward, value, terminated or truncated)
+            # Store transition with directions and magnitudes separately
+            agent.store_transition(obs, directions, magnitudes, log_prob, reward, value, terminated or truncated)
             
             # Update metrics
             training_state.timesteps += 1
@@ -714,14 +747,14 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             
             # Log step details based on config
             if step % config.log_frequency == 0 and config.log_motor_details:
-                if config.use_variable_step_sizes and 'movement_details' in info:
+                if 'movement_details' in info and info['movement_details']:
                     # Enhanced logging with step sizes
                     movements = []
                     for motor_num in sorted(info['motors_moved']):
                         direction, step_size = info['movement_details'][motor_num]
                         # Convert direction number to string
                         dir_str = 'CCW' if direction == -1 else 'CW' if direction == 1 else 'HOLD'
-                        movements.append(f"{motor_num}:{dir_str}{step_size}")  # ✅ CORRECT
+                        movements.append(f"{motor_num}:{dir_str}{step_size}")
                     motors_str = f"[{', '.join(movements)}]" if movements else "[]"
                 else:
                     # Legacy logging
@@ -847,8 +880,16 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     
     # Cleanup
     logger.info("Cleaning up resources...")
-    env.close()
     audio.stop()
+    env.close()
+
+    # if interactive_controller:
+    #         interactive_controller.stop()
+            
+        # Ensure all string changes are complete
+    if string_change_manager and string_change_manager.active_string_changes:
+        logger.warning("Completing pending string changes before exit...")
+        string_change_manager.complete_all_string_changes()
 
     if 'osc_handler' in locals():
         logger.info("Stopping SuperCollider synths...")

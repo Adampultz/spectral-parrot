@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 import numpy as np
 import logging
+from torch.distributions import Categorical, Beta
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,10 @@ class MotorActorNetwork(nn.Module):
                  dropout_rate=0.1, 
                  hold_bias=0.5, 
                  step_size_logits_bias=None,
-                 activation='relu'):
+                 activation='relu',
+                 min_step_size=10,
+                 max_step_size=100,
+                 step_size_bias=1.5):
         """
         Initialize the motor actor network.
         
@@ -42,6 +46,9 @@ class MotorActorNetwork(nn.Module):
         self.hold_bias = hold_bias
         self.step_size_logits_bias = step_size_logits_bias
         self.hold_action_index = (num_actions_per_motor - 1) // 2
+        self.min_step_size = min_step_size
+        self.max_step_size = max_step_size
+        self.step_size_bias = step_size_bias
 
         # Select activation function
         if activation == 'relu':
@@ -66,18 +73,6 @@ class MotorActorNetwork(nn.Module):
             in_features = hidden_size
         
         self.feature_extractor = nn.Sequential(*layers)
-        
-        # # Simpler architecture for discrete-only control
-        # self.feature_extractor = nn.Sequential(
-        #     nn.Linear(state_dim, hidden_size),
-        #     nn.LayerNorm(hidden_size) if use_layernorm else nn.Identity(),
-        #     nn.ReLU(),
-        #     nn.Dropout(dropout_rate),
-        #     nn.Linear(hidden_size, hidden_size),
-        #     nn.LayerNorm(hidden_size) if use_layernorm else nn.Identity(),
-        #     nn.ReLU(),
-        #     nn.Dropout(dropout_rate)
-        # )
 
         final_hidden = hidden_layers[-1] if hidden_layers else state_dim
         # Action heads (use last hidden size)
@@ -88,6 +83,15 @@ class MotorActorNetwork(nn.Module):
                 nn.Linear(final_hidden // 2, num_actions_per_motor)  # VARIABLE
             ) for _ in range(num_motors)
         ])
+
+        # Magnitude head - Beta distribution parameters per motor
+        # Outputs 2 values per motor: alpha and beta for Beta(alpha, beta)
+        self.magnitude_head = nn.Sequential(
+            nn.Linear(final_hidden, final_hidden // 2),
+            self.activation_fn,
+            nn.Linear(final_hidden // 2, num_motors * 2),
+            nn.Softplus()  # Ensures positive parameters
+        )
         
         # Temperature for exploration control
         self.temperature = 1.0
@@ -155,8 +159,14 @@ class MotorActorNetwork(nn.Module):
                 logits = logits / self.temperature
             
             action_dists.append(Categorical(logits=logits))
-        
-        return action_dists
+
+        # Generate Beta distribution parameters for magnitudes
+            magnitude_params = self.magnitude_head(features)
+            # Split into alpha and beta, add small constant to ensure > 0
+            alphas = magnitude_params[..., :self.num_motors] + 1.0
+            betas = magnitude_params[..., self.num_motors:] + 1.0
+
+        return action_dists, alphas, betas
     
     def sample(self, state):
         """
@@ -166,59 +176,114 @@ class MotorActorNetwork(nn.Module):
             state: State tensor [batch_size, state_dim] or [state_dim]
             
         Returns:
-            actions: Tensor of motor actions [batch_size, num_motors] or [num_motors]
-            log_prob: Combined log probability of all actions
+            motor_commands: Tensor of actual motor step commands
+            directions: Tensor of direction actions (0=CCW, 1=HOLD, 2=CW)
+            magnitudes: Tensor of sampled magnitude values [0, 1]
+            log_prob: Combined log probability (directions + magnitudes)
         """
-        action_dists = self.forward(state)
+        action_dists, alphas, betas = self.forward(state)
         
-        # Sample action for each motor
-        actions = torch.stack([dist.sample() for dist in action_dists], dim=-1)
+        # Sample direction for each motor
+        directions = torch.stack([dist.sample() for dist in action_dists], dim=-1)
         
-        # Calculate log probabilities
-        # Handle both batched and unbatched cases
-        if actions.dim() == 1:
-            log_probs = torch.stack([
-                dist.log_prob(actions[i]) 
+        # Calculate log probabilities of directions
+        if directions.dim() == 1:
+            direction_log_probs = torch.stack([
+                dist.log_prob(directions[i]) 
                 for i, dist in enumerate(action_dists)
             ], dim=-1)
         else:
-            # Batched: actions shape is [batch_size, num_motors]
-            log_probs = torch.stack([
-                dist.log_prob(actions[:, i]) 
+            direction_log_probs = torch.stack([
+                dist.log_prob(directions[:, i]) 
                 for i, dist in enumerate(action_dists)
             ], dim=-1)
         
-        # Sum log probabilities across all motors
-        total_log_prob = log_probs.sum(dim=-1)
+        # Sample magnitudes from Beta distributions
+        if alphas.dim() == 1:
+            # Unbatched
+            magnitude_dists = [Beta(alphas[i], betas[i]) for i in range(self.num_motors)]
+            magnitudes = torch.stack([dist.sample() for dist in magnitude_dists], dim=-1)
+            magnitude_log_probs = torch.stack([
+                dist.log_prob(magnitudes[i]) 
+                for i, dist in enumerate(magnitude_dists)
+            ], dim=-1)
+        else:
+            # Batched
+            magnitude_dists = [Beta(alphas[:, i], betas[:, i]) for i in range(self.num_motors)]
+            magnitudes = torch.stack([dist.sample() for dist in magnitude_dists], dim=-1)
+            magnitude_log_probs = torch.stack([
+                dist.log_prob(magnitudes[:, i]) 
+                for i, dist in enumerate(magnitude_dists)
+            ], dim=-1)
         
-        return actions, total_log_prob
+        # Apply bias transformation (optional - can still use this)
+        magnitude_biased = torch.pow(magnitudes, self.step_size_bias)
+        
+        # Scale to step sizes
+        step_sizes = self.min_step_size + magnitude_biased * (self.max_step_size - self.min_step_size)
+        
+        # Convert directions to movement values
+        direction_map = torch.tensor([-1, 0, 1], device=directions.device, dtype=torch.float32)
+        direction_values = direction_map[directions]
+        
+        # Apply HOLD mask
+        hold_mask = (directions == 1)
+        step_sizes = step_sizes * (~hold_mask).float()
+        magnitude_biased = magnitude_biased * (~hold_mask).float()
+        
+        # Final motor commands
+        motor_commands = direction_values * step_sizes
+        
+        # Combined log probability (sum over all motors)
+        total_log_prob = direction_log_probs.sum(dim=-1) + magnitude_log_probs.sum(dim=-1)
+        
+        return motor_commands, directions, magnitude_biased, total_log_prob
     
-    def evaluate(self, state, actions):
+    def evaluate(self, state, directions, magnitudes):
         """
         Evaluate log probability and entropy of given actions.
         
         Args:
             state: State tensor [batch_size, state_dim]
-            actions: Action tensor [batch_size, num_motors]
+            directions: Direction tensor [batch_size, num_motors]
+            magnitudes: Magnitude tensor [batch_size, num_motors]
             
         Returns:
             log_prob: Log probability of actions
-            entropy: Entropy of the action distributions
+            entropy: Entropy of the distributions
         """
-        action_dists = self.forward(state)
+        action_dists, alphas, betas = self.forward(state)
         
-        # Calculate log probabilities for given actions
-        log_probs = torch.stack([
-            dist.log_prob(actions[:, i]) 
+        # Evaluate directions
+        direction_log_probs = torch.stack([
+            dist.log_prob(directions[:, i]) 
             for i, dist in enumerate(action_dists)
         ], dim=-1)
         
-        # Calculate entropy for each distribution
-        entropies = torch.stack([dist.entropy() for dist in action_dists], dim=-1)
+        direction_entropies = torch.stack([
+            dist.entropy() for dist in action_dists
+        ], dim=-1)
         
-        # Sum across motors
-        total_log_prob = log_probs.sum(dim=-1)
-        total_entropy = entropies.sum(dim=-1)
+        # Evaluate magnitudes (need to reverse bias if applied)
+        magnitudes_unbiased = torch.pow(magnitudes, 1.0/self.step_size_bias)
+        
+        # Clamp to valid range
+        magnitudes_unbiased = torch.clamp(magnitudes_unbiased, 1e-6, 1.0 - 1e-6)
+        
+        # Create Beta distributions and compute log probs
+        magnitude_dists = [Beta(alphas[:, i], betas[:, i]) for i in range(self.num_motors)]
+        magnitude_log_probs = torch.stack([
+            dist.log_prob(magnitudes_unbiased[:, i])
+            for i, dist in enumerate(magnitude_dists)
+        ], dim=-1)
+        
+        magnitude_entropies = torch.stack([
+            dist.entropy() for dist in magnitude_dists
+        ], dim=-1)
+        
+        # Combined values
+        total_log_prob = direction_log_probs.sum(dim=-1) + magnitude_log_probs.sum(dim=-1)
+        total_entropy = direction_entropies.sum(dim=-1) + magnitude_entropies.sum(dim=-1)
         
         return total_log_prob, total_entropy
     
