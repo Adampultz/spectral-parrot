@@ -4,6 +4,8 @@ The Spectral Parrot is an self-actuating (feedback) instrument with 8 strings, e
 
 This repository comprises the code for Python (machine learning), SuperCollider (feedback processing and audio routing), and C (motor driver control running on two ESP32s). It is assumed that you have Python, SuperCollider, and the Arduino IDE (or similar) installed and are familiar with how these softwares work.
 
+The repo is still under construction and using the code is at your own risk. Get in touch if you are serious about using it.
+
 INSTRUCTIONS:
 
 1. Build a parrot. Instructions for this are pending.
@@ -25,12 +27,11 @@ Once all strings are as tight as you like, you have a few options: Either you ca
 Training:
 Command: ```$ python main_motor_training.py```. 
 
-Required training flags:
-```--input-device```: the number of your input device. You can check this by running ```$ --list-devices```.
-```--port1 and --port2 /dev/cu.usbserial-2: your serial ports for your microcontrollers
-In your terminal, type $ python main_motor_training.py --input-device 8 --port1 "ESP32_1" --port2 /dev/cu.usbserial-2 "ESP32_2".  
+Training flags:
+```--input-device```: the number of your input device. You can check this by using the flag ```$ --list-devices```.
+```--port1 and --port2```: see "Calibrating motors above
 
-Once you run this command, training should begin by starting SuperCollider (you should hear the strings start feeding back) and triggering the motors to start calibration. This calibration consists in all tuners turning to their clockwise stallguard block (see the section on motor calibration above) and then position themselves at a random point between the clockwise and counter-clockwise limits. This calibration takes place after each episode in order to avoid overfitting to a single starting point and additionally avoiding any position tracking drift accumulating across episodes. You can set the flag --skip-calibration to go straight to training. This flag is only recommended for troubleshooting or short test runs, as the motor tracking will be off without calibration.
+Once you run this command, training should begin by starting SuperCollider (you should hear the strings start feeding back) and triggering the motors to start calibration. This calibration consists in all tuners turning to their clockwise stallguard block (see the section on motor calibration above) and then position themselves at a random point between the clockwise and counter-clockwise limits. The calibration takes place after each episode in order to avoid overfitting to a single starting point and additionally avoiding any position tracking drift accumulating across episodes. You can set the flag --skip-calibration to go straight to training. This flag is only recommended for troubleshooting or short test runs, as the motor tracking will be off without calibration.
 
 
 
