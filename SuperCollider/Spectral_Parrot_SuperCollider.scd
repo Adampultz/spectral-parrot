@@ -6,7 +6,7 @@ var createOSCHandler;
 s.options.memSize_(2.pow(20));
 s.options.sampleRate_(sampleRate);
 s.options.numInputBusChannels_(30);
-// s.options.hardwareBufferSize_(6);
+s.options.hardwareBufferSize_(64);
 s.options.numOutputBusChannels_(30);
 s.options.recChannels_(8);
 s.options.maxSynthDefs = 2048;
@@ -25,6 +25,7 @@ s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 ~outBlackholeTraining = 0;
 ~outBlackholeStrings = 1;
 ~currentTrainingAudioIndex = 0;
+~delayTime = 0.005; // to compensate for phase issues between the two speakers
 
 ~minFreq = 40;
 ~maxfreq = 2000;
@@ -40,6 +41,7 @@ s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 ~stringGain = 8.collect{Bus.control(s).set(1.0)};
 ~trainingAudioSel = Bus.control(s).set(1);  // 0 = Audio input, 1 = Sample, 2 = harmonic sine spectrums, 3 = Summed sines (random frequencies),
 ~integration_factor = Bus.control(s).set(0.3);
+~delayTimeBus = Bus.control(s);
 
 // Initialize as nil - will be populated by OSC message
 ~trainingAudioPaths = nil;
@@ -67,13 +69,14 @@ s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 			\inChanOffset, ~stringInChan,
 			\stringGain, ~stringGain,
 			\outChan, ~parrotOutChan,
-			\outBlackhole, ~outBlackholeStrings
+			\outBlackhole, ~outBlackholeStrings,
+			\delayTime, ~delayTimeBus,
 		], target: ~audioGrp);
 
 		~updateTask = Task({
 			loop {
 				~updateDirection.value;
-				0.01.wait;
+				0.005.wait;
 			}
 		}).play;
 
@@ -244,6 +247,7 @@ s.waitForBoot({
 
 	// Set string gains
 	~stringGain.do{|i| i.set(1.5)};
+	~delayTimeBus.set(~delayTime);
 
 	s.sync;
 
@@ -308,15 +312,15 @@ s.waitForBoot({
 	}).add;
 
 	SynthDef(\strings, {
-		|freqBus, inChanOffset, outChanPy, outChanMonitor, analysisBus, stringGain, outChan, outBlackhole|
-		var oscArray, amp, ampDiffNeighbours, directions, sineAM, sineState, sumSigs;
+		|freqBus, inChanOffset, outChanPy, outChanMonitor, analysisBus, stringGain, outChan, outBlackhole, delayTime|
+		var oscArray, amp, ampDiffNeighbours, directions, sineAM, sineState, sumSigs, sumSigsDelayed;
 
 		// Input from 8 self-oscillating strings
 		oscArray = SoundIn.ar(8.collect{|i| inChanOffset + i});
 		oscArray = oscArray * In.kr(stringGain);
 
 		// Get amplitude of each string
-		amp = RMS.ar(oscArray, 20).ampdb.linlin(-65.0, 0.0, 0, 1.0).scope;
+		amp = RMS.ar(oscArray, 20).ampdb.linlin(-65.0, 0.0, 0, 1.0);
 		amp = Integrator.ar(amp, In.kr(~integration_factor)).clip(0.0, 1.0);
 
 		// Calculate amplitude difference between string and neighbors
@@ -341,9 +345,10 @@ s.waitForBoot({
 		8.do{|i| Out.kr(~sineStates[i], sineState[i])};
 
 		sumSigs = Mix(LeakDC.ar(oscArray * sineAM)) * 3.0;
+		sumSigsDelayed = DelayN.ar(sumSigs, delaytime: In.kr(delayTime));
 
 		// Output mixed signal
-		Out.ar(outChan, sumSigs);
+		Out.ar(outChan, [sumSigs, sumSigsDelayed]);
 		Out.ar(outBlackhole, Mix(oscArray));
 	}).add;
 
