@@ -63,7 +63,7 @@ class InteractiveController:
                 
                 # Return to raw mode if listener is active
                 if not self.stop_listener.is_set() and self.old_settings:
-                    tty.setraw(sys.stdin.fileno())
+                    tty.setcbreak(sys.stdin.fileno())
             except Exception as e:
                 logger.error(f"Error in safe_print: {e}")
         
@@ -97,11 +97,6 @@ class InteractiveController:
             logger.info("Interactive controller started")
             logger.info("Keyboard listener active - press 'h' for help")
             
-            # Force flush all output to ensure logs are written immediately
-            import sys
-            sys.stdout.flush()
-            sys.stderr.flush()
-            
             self.listener_thread = threading.Thread(
                 target=self._keyboard_listener,
                 daemon=True
@@ -123,13 +118,12 @@ class InteractiveController:
     def _keyboard_listener(self):
         """Background thread for keyboard input."""
         try:
-            # Delay to allow ALL startup logging to complete before entering raw mode
-            # Increased to 2.0s to be very conservative
-            time.sleep(5.0)
+            # Small delay to ensure any final log flushes complete
+            time.sleep(0.2)
             
             # Save terminal settings
             self.old_settings = termios.tcgetattr(sys.stdin)
-            tty.setraw(sys.stdin.fileno())
+            tty.setcbreak(sys.stdin.fileno())
             
             while not self.stop_listener.is_set():
                 # Check for available input with timeout
@@ -141,7 +135,7 @@ class InteractiveController:
                         # Show help with proper terminal handling
                         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
                         self._show_help()
-                        tty.setraw(sys.stdin.fileno())
+                        tty.setcbreak(sys.stdin.fileno())
                     elif char.lower() == 'p':
                         self._handle_pause()
                     elif char.lower() == 'r':
@@ -464,7 +458,7 @@ class InteractiveController:
                 
                 # Return to raw mode if listener is active
                 if not self.stop_listener.is_set() and self.old_settings:
-                    tty.setraw(sys.stdin.fileno())
+                    tty.setcbreak(sys.stdin.fileno())
             except Exception as e:
                 logger.error(f"Error in _show_help: {e}")
 

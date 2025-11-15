@@ -559,9 +559,8 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         agent=None  # Will be set after agent creation
     )
 
-    # Create interactive controller
-    # interactive_controller = InteractiveController(string_change_manager)
-    # interactive_controller.start()
+    # # Create interactive controller
+    interactive_controller = InteractiveController(string_change_manager)
     
     logger.info("String change manager initialized - press 'h' for help")
 
@@ -682,7 +681,10 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     else:
         logger.info("Audio rotation disabled (training_audio_rotation_interval = 0)")
 
-        
+    logger.info("Starting keyboard listener...")
+    interactive_controller.start()
+    logger.info("Keyboard listener active - press 'h' for help")
+      
     while training_state.timesteps < config.total_timesteps:
         training_state.episode += 1
 
@@ -720,11 +722,12 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         
         for step in range(config.max_ep_length):
             # Select action - unpack all 5 values from hybrid actor
-            motor_commands, directions, magnitudes, log_prob, value = agent.select_action(obs)
 
             while string_change_manager and string_change_manager.training_paused:
                 time.sleep(0.1)
                 continue
+
+            motor_commands, directions, magnitudes, log_prob, value = agent.select_action(obs)
             
             # Pass DIRECTIONS and MAGNITUDES to environment for hybrid mode
             next_obs, reward, terminated, truncated, info = env.step(
@@ -883,8 +886,8 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     audio.stop()
     env.close()
 
-    # if interactive_controller:
-    #         interactive_controller.stop()
+    if interactive_controller:
+            interactive_controller.stop()
             
         # Ensure all string changes are complete
     if string_change_manager and string_change_manager.active_string_changes:

@@ -86,14 +86,17 @@ class MotorPositionTracker:
             return False
     
     def clear(self, motor_num: Optional[int] = None):
-        """Clear saved data for a motor or all motors"""
         if motor_num is not None:
             self.saved_positions.pop(motor_num, None)
-            self.slacken_steps.pop(motor_num, None)
+            self.current_positions.pop(motor_num, None)
+            self.total_slacken_steps.pop(motor_num, None)
+            self.slacken_history.pop(motor_num, None)
             self.original_speeds.pop(motor_num, None)
         else:
             self.saved_positions.clear()
-            self.slacken_steps.clear()
+            self.current_positions.clear()
+            self.total_slacken_steps.clear()          
+            self.slacken_history.clear()
             self.original_speeds.clear()
 
 class StringChangeManager:
@@ -125,8 +128,8 @@ class StringChangeManager:
         
         # Safety parameters
         self.slacken_steps_default = 500  # Default steps to slacken
-        self.slacken_speed = 100          # Slower speed for controlled slackening
-        self.restore_speed = 150          # Moderate speed for position restoration
+        self.slacken_speed = 200          # Slower speed for controlled slackening
+        self.restore_speed = 200          # Moderate speed for position restoration
         self.verification_pause = 0.5      # Pause after restoration for settling
         
         # Control flags
