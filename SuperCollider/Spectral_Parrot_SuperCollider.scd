@@ -6,7 +6,7 @@ var createOSCHandler;
 s.options.memSize_(2.pow(20));
 s.options.sampleRate_(sampleRate);
 s.options.numInputBusChannels_(30);
-s.options.hardwareBufferSize_(64);
+// s.options.hardwareBufferSize_(256);
 s.options.numOutputBusChannels_(30);
 s.options.recChannels_(8);
 s.options.maxSynthDefs = 2048;
@@ -21,11 +21,12 @@ s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 ~outTargetAudio = 1;
 ~stringInChan = 16;
 ~parrotOutChan = 18;
+~paOutChan = 20;
 ~trainingOutChan = 16;
 ~outBlackholeTraining = 0;
 ~outBlackholeStrings = 1;
 ~currentTrainingAudioIndex = 0;
-~delayTime = 0.005; // to compensate for phase issues between the two speakers
+~delayTime = 0.003; // to compensate for phase issues between the two speakers
 
 ~minFreq = 40;
 ~maxfreq = 2000;
@@ -307,8 +308,11 @@ s.waitForBoot({
 			]
 		);
 
+		src = HPF.ar(src, 30);
+		src = LPF.ar(src, 2100);
+
 		Out.ar(outBlackhole, src);
-		Out.ar(outChanMonitor, src);
+		Out.ar(outChanMonitor, [src, src]);
 	}).add;
 
 	SynthDef(\strings, {
@@ -344,12 +348,13 @@ s.waitForBoot({
 		8.do{|i| Out.kr(~ampDiffs[i], ampDiffNeighbours[i])};
 		8.do{|i| Out.kr(~sineStates[i], sineState[i])};
 
-		sumSigs = Mix(LeakDC.ar(oscArray * sineAM)) * 3.0;
+		sumSigs = Mix(LeakDC.ar(oscArray * sineAM)) * 4.0;
 		sumSigsDelayed = DelayN.ar(sumSigs, delaytime: In.kr(delayTime));
 
 		// Output mixed signal
 		Out.ar(outChan, [sumSigs, sumSigsDelayed]);
 		Out.ar(outBlackhole, Mix(oscArray));
+		Out.ar(~paOutChan, SplayAz.ar(4, oscArray));
 	}).add;
 
 	s.sync;
