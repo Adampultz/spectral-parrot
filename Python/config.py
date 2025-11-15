@@ -46,7 +46,7 @@ class TrainingConfig:
 
     min_step_size: int = 10
     max_step_size: int = 100
-    step_size_bias: float = 1.3
+    step_size_bias: float = 1.2
 
     # ========================================
     # PPO Hyperparameters
@@ -89,13 +89,13 @@ class TrainingConfig:
     # Network Architecture
     # ========================================
     hidden_size: int = 64
-    hold_bias: float = 0.4 # The higher the value, the more prone the network is to turn fewer motors
+    hold_bias: float = 1.0 # The higher the value, the more prone the network is to turn fewer motors
     
     # ========================================
     # Spectral Loss Normalization
     # ========================================
     use_normalized_loss: bool = True                  # Use volume-invariant normalized loss.
-    min_signal_threshold: float = 0.0                 # Minimum signal level (below = penalty)
+    min_signal_threshold: float = 0.05               # Minimum signal level (below = penalty)
     weak_signal_penalty: float = 0.0                 # Penalty when signal too weak
     normalization_method: str = "l2"                  # "l2" (Frobenius) or "cosine"
 
@@ -315,8 +315,8 @@ class TrainingConfig:
     # ========================================
     # Training data management
     # ========================================
-    training_audio_rotation_interval: int = 10  # Change audio every N episodes (0 = disabled)
-    training_audio_folder: str = "/Users/adammac2023/Documents/Musik-business/Projects/Spectral Parrot/Audio/Recordings/Nov_2025/Oct_29th/Renders"    
+    training_audio_rotation_interval: int = 5  # Change audio every N episodes (0 = disabled)
+    training_audio_folder: str = "/Users/adammac2023/Documents/Musik-business/Projects/Spectral Parrot/Audio/Training Audio/Nov_13th_mono"    
     # ========================================
     # Helper Methods
     # ========================================
