@@ -874,13 +874,6 @@ class MotorEnvironment(gym.Env):
             logger.error(f"Failed to get observation: {e}")
             raise RuntimeError("Failed to get observation") from e
     
-    def _execute_motor_movements(self, movement_commands):
-        """Execute motor movements - all are full motor_steps."""
-        for motor_num, (direction, steps) in movement_commands.items():
-            self.motor_controller.set_speed(motor_num, self.motor_speed)
-            self.motor_controller.set_direction(motor_num, 0 if direction == 'CCW' else 1)
-            self.motor_controller.move_steps(motor_num, self.motor_steps)
-    
     def _wait_for_motors_completion(self, motors_moving, movement_commands, timeout=30.0, stabilization_time=2.0):
         """
         Wait for motors to complete movement with improved tracking and verification.
@@ -937,7 +930,8 @@ class MotorEnvironment(gym.Env):
                                         old_pos = self.motor_positions[motor_idx]
                                         drift_corrected = self.max_cw_steps[motor_idx] - old_pos
 
-                                        if drift_corrected <= self.motor_steps:
+                                        commanded_steps = movement_commands.get(motor_num, (None, self.motor_steps[motor_idx]))[1]
+                                        if drift_corrected <= commanded_steps:
                                             # Only correct for drift if motor is within the motor's step size (to avoid false calibration)
                                             self.motor_positions[motor_idx] = self.max_cw_steps[motor_idx]
                                             logger.info(f"  Position recalibrated: {old_pos} → {self.max_cw_steps[motor_idx]}")
@@ -1121,22 +1115,6 @@ class MotorEnvironment(gym.Env):
                     logger.info(f"BREAKTHROUGH! New best loss: {current_loss:.4f} (bonus: {breakthrough_bonus:.2f})")
                 else:
                     breakthrough_bonus = 0.0
-
-        if self.previous_loss is not None:
-            improvement = self.previous_loss - current_loss
-            
-            # Add to improvement history
-            self.improvement_history.append(improvement)
-            
-            # Average recent improvements
-            avg_improvement = np.mean(list(self.improvement_history))
-            
-            # Bonus for improvement, penalty for worsening (do we need a multiplier? Previously scaled by * 5)
-            improvement_bonus = improvement
-            
-            # Extra bonus for consistent improvement
-            if avg_improvement > 0 and improvement > 0:
-                consistency_bonus = min(avg_improvement * 5.0, 1.0)
         
         # 5. Movement penalty
         movement_penalty = 0
