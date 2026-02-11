@@ -6,7 +6,7 @@ var createOSCHandler;
 s.options.memSize_(2.pow(20));
 s.options.sampleRate_(sampleRate);
 s.options.numInputBusChannels_(30);
-// s.options.hardwareBufferSize_(256);
+s.options.hardwareBufferSize_(256);
 s.options.numOutputBusChannels_(30);
 s.options.recChannels_(8);
 s.options.maxSynthDefs = 2048;
@@ -16,17 +16,19 @@ s.recHeaderFormat = "wav";
 s.options.outDevice_("Blackhole16_FirefaceUFXIII");
 s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 
+~channel_offset = 16;
+~target_audio_channel = 8 + ~channel_offset;
+~room_audio_channel = 9 + ~channel_offset;
 ~inChannel = 24;
 ~outInAudio = 0;
 ~outTargetAudio = 1;
-~stringInChan = 16;
 ~parrotOutChan = 18;
-~paOutChan = 20;
+~paOutChan = 22;
 ~trainingOutChan = 16;
 ~outBlackholeTraining = 0;
 ~outBlackholeStrings = 1;
 ~currentTrainingAudioIndex = 0;
-~delayTime = 0.003; // to compensate for phase issues between the two speakers
+~delayTime = 0.002; // to compensate for phase issues between the two speakers
 
 ~minFreq = 40;
 ~maxfreq = 2000;
@@ -40,9 +42,12 @@ s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 ~ampDiffs = 8.collect{Bus.control(s).set(0.1)};
 ~sineStates = 8.collect{Bus.control(s).set(0.1)};
 ~stringGain = 8.collect{Bus.control(s).set(1.0)};
+~amp_mod_bus = 8.collect{Bus.control(s)};
+~stringPhases = 8.collect{Bus.control(s)};
 ~trainingAudioSel = Bus.control(s).set(1);  // 0 = Audio input, 1 = Sample, 2 = harmonic sine spectrums, 3 = Summed sines (random frequencies),
 ~integration_factor = Bus.control(s).set(0.3);
 ~delayTimeBus = Bus.control(s);
+~stringAmpControlBal = Bus.control(s);
 
 // Initialize as nil - will be populated by OSC message
 ~trainingAudioPaths = nil;
@@ -52,14 +57,16 @@ s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 ~pythonOSCAddress = NetAddr("127.0.0.1", 3333);
 
 ~initiate = {
-	// Make sure we have loaded audio before starting
+/*	// Make sure we have loaded audio before starting
 	if (~trainingAudio.isNil, {
 		"ERROR: No training audio loaded! Send /load_training_audio_path first.".postln;
-	}, {
+	}, {*/
 		~trainingSynth = Synth(\trainingAudio, [
 			\buf, ~trainingAudio,  // Use ~trainingAudio directly (current buffer)
 			\analysisBus, ~targetAudioBus,
 			\trainingAudioSel, ~trainingAudioSel,
+		\target_audio_input_chan, ~target_audio_channel,
+		\room_audio_input_chan, ~room_audio_channel,
 			\inChanOffset, ~inChannel,
 			\outChanMonitor, ~trainingOutChan,
 			\outBlackhole, ~outBlackholeTraining
@@ -67,11 +74,14 @@ s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 
 		~stringSynth = Synth(\strings, [
 			\analysisBus, ~inputAudioBus,
-			\inChanOffset, ~stringInChan,
+		\target_audio_channel, ~target_audio_channel,
+		\room_audio_channel, ~room_audio_channel,
 			\stringGain, ~stringGain,
 			\outChan, ~parrotOutChan,
 			\outBlackhole, ~outBlackholeStrings,
 			\delayTime, ~delayTimeBus,
+		\amp_mod_bus, ~amp_mod_bus,
+		\amp_mod_balance_control, ~stringAmpControlBal
 		], target: ~audioGrp);
 
 		~updateTask = Task({
@@ -81,8 +91,8 @@ s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 			}
 		}).play;
 
-		"Training synths started successfully".postln;
-	});
+/*		"Training synths started successfully".postln;
+	});*/
 };
 
 // OSCdef to load training audio from a folder path
@@ -239,12 +249,14 @@ s.waitForBoot({
 		~phasorTests[i].set(1);
 		~directions[i].set(1);
 		~ampDiffs[i].set(0.1);
-
+		~amp_mod_bus[i].set(1.0);
 		~sineStates[i].set(0.1);
 		~stringGain[i].set(1.5);
+		~stringPhases[i].set(1);
 	};
 	~trainingAudioSel.set(1);  // 0 = Audio input, 1 = Sample, 2 = harmonic sine spectrums, 3 = Summed sines (random frequencies),
 	~integration_factor.set(0.3);
+	~stringAmpControlBal.set(-1);
 
 	// Set string gains
 	~stringGain.do{|i| i.set(1.5)};
@@ -284,13 +296,20 @@ s.waitForBoot({
 
 	// Define SynthDefs
 	SynthDef(\trainingAudio, {
-		|buf, outChanPy, outChanMonitor, analysisBus, inChanOffset, trainingAudioSel, outBlackhole|
-		var src;
+		|buf, outChanPy, outChanMonitor, analysisBus, inChanOffset, trainingAudioSel, outBlackhole, target_audio_input_chan, room_audio_input_chan, schmitt_high = 0.1, schmitt_low = 0.01|
+		var src, live_input, room_audio_input, target_volume, target_volume_integrated, target_vol_trig;
+
+		live_input = SoundIn.ar(target_audio_input_chan.poll);
+		room_audio_input = SoundIn.ar(room_audio_input_chan);
+		target_volume = RMS.kr(live_input, 4);
+		target_volume_integrated = Integrator.kr(target_volume, 0.95).scope;
+		target_vol_trig = OnePole.kr(Schmidt.kr(target_volume_integrated, schmitt_low, schmitt_high), 0.995).scope;
+		live_input = XFade2.ar(room_audio_input, live_input, (target_vol_trig * 2) - 1).scope;
 
 		src = Select.ar(In.kr(trainingAudioSel),
 			[
 				// Mode 0: Audio input
-				Mix.ar(SoundIn.ar([inChanOffset, inChanOffset + 1, inChanOffset + 2, inChanOffset + 3])),
+				live_input,
 
 				// Mode 1: Buffer playback
 				PlayBuf.ar(1, buf, loop: 1) * 0.5,
@@ -316,8 +335,11 @@ s.waitForBoot({
 	}).add;
 
 	SynthDef(\strings, {
-		|freqBus, inChanOffset, outChanPy, outChanMonitor, analysisBus, stringGain, outChan, outBlackhole, delayTime|
-		var oscArray, amp, ampDiffNeighbours, directions, sineAM, sineState, sumSigs, sumSigsDelayed;
+		|freqBus, inChanOffset, outChanPy, outChanMonitor, analysisBus, stringGain, outChan, outBlackhole, delayTime, amp_mod_bus, amp_mod_balance_control|
+		var oscArray, amp, ampDiffNeighbours, directions, sineAM, sineState, amp_mod_balance, sumSigs, sumSigsDelayed, sine_mod_array,amp_mod_array;
+
+		sine_mod_array = 8.collect{};
+		amp_mod_array = 8.collect{};
 
 		// Input from 8 self-oscillating strings
 		oscArray = SoundIn.ar(8.collect{|i| inChanOffset + i});
@@ -340,15 +362,26 @@ s.waitForBoot({
 		directions = 8.collect{|i| In.kr(~directions[i])};
 
 		// Create sine AM oscillators
-		sineAM = SinOsc.ar(directions, 0, 0.6, 0.45);
+		sineAM = SinOsc.ar(directions, 0, 0.5, 0.5);
 		sineState = sineAM > 0.5;
 
 		// Output to control buses
-		8.do{|i| Out.kr(~phasorTests[i], Slope.ar(sineAM[i]))};
-		8.do{|i| Out.kr(~ampDiffs[i], ampDiffNeighbours[i])};
-		8.do{|i| Out.kr(~sineStates[i], sineState[i])};
+		8.do{|i|
+			Out.kr(~phasorTests[i], Slope.ar(sineAM[i]));
+			Out.kr(~ampDiffs[i], ampDiffNeighbours[i]);
+			Out.kr(~sineStates[i], sineState[i])
+		};
 
-		sumSigs = Mix(LeakDC.ar(oscArray * sineAM)) * 4.0;
+		8.do{|i|
+			var string_idx = oscArray[i] * OnePole.kr(In.kr(~stringPhases[i]), 0.9);
+			sine_mod_array[i] = string_idx * sineAM[i];
+			amp_mod_array[i] = string_idx * OnePole.kr(In.kr(~amp_mod_bus[i]));
+		};
+
+		amp_mod_balance = XFade2.ar(sine_mod_array, amp_mod_array, In.kr(amp_mod_balance_control));
+
+		// sumSigs = Mix(LeakDC.ar(oscArray * sineAM)) * 2.0;
+		sumSigs = Mix(LeakDC.ar(amp_mod_balance)) * 3.0;
 		sumSigsDelayed = DelayN.ar(sumSigs, delaytime: In.kr(delayTime));
 
 		// Output mixed signal
