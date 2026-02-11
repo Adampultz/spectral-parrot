@@ -11,10 +11,7 @@ from torch.distributions import Categorical, Beta
 logger = logging.getLogger(__name__)
 
 class MotorActorNetwork(nn.Module):
-    """
-    Simplified actor network for discrete motor control.
-    Each motor has 3 actions: CCW (0), HOLD (1), CW (2)
-    """
+
     def __init__(self, 
                  state_dim, 
                  num_motors, 
@@ -161,10 +158,10 @@ class MotorActorNetwork(nn.Module):
             action_dists.append(Categorical(logits=logits))
 
         # Generate Beta distribution parameters for magnitudes
-            magnitude_params = self.magnitude_head(features)
-            # Split into alpha and beta, add small constant to ensure > 0
-            alphas = magnitude_params[..., :self.num_motors] + 1.0
-            betas = magnitude_params[..., self.num_motors:] + 1.0
+        magnitude_params = self.magnitude_head(features)
+        # Split into alpha and beta, add small constant to ensure > 0
+        alphas = magnitude_params[..., :self.num_motors] + 1.0
+        betas = magnitude_params[..., self.num_motors:] + 1.0
 
         return action_dists, alphas, betas
     
@@ -294,7 +291,8 @@ class MotorActorNetwork(nn.Module):
         Returns:
             probs: [batch_size, num_motors, 3] tensor of action probabilities
         """
-        action_dists = self.forward(state)
+        # action_dists = self.forward(state)
+        action_dists, _, _ = self.forward(state)
         probs = torch.stack([dist.probs for dist in action_dists], dim=1)
         return probs
     
