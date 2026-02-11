@@ -261,7 +261,7 @@ def load_checkpoint(checkpoint_path: str,
     # Create or update agent
     if agent is None:
         agent = MotorPPOAgent(
-            state_dim=2,
+            state_dim=config.state_dim,
             num_motors=config.num_motors,
             num_actions_per_motor=config.get_num_actions_per_motor(),
             device=device,
