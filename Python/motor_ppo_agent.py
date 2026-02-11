@@ -146,11 +146,11 @@ class MotorPPOAgent:
         # Initialize memory
         self.memory = MotorPPOMemory(batch_size)
         
-        # Exploration temperature schedule
-        self.initial_temperature = 2.0  # Up from 1.0
-        self.temperature_decay = 0.998 
-        self.min_temperature = 0.3
-        self.current_temperature = self.initial_temperature
+        # # Exploration temperature schedule
+        # self.initial_temperature = 2.0  # Up from 1.0
+        # self.temperature_decay = 0.998 
+        # self.min_temperature = 0.3
+        # self.current_temperature = self.initial_temperature
 
         self.value_coef = value_coef
         self.normalize_advantages = normalize_advantages
