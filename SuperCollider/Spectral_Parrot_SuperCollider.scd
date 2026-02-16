@@ -6,7 +6,7 @@ var createOSCHandler;
 s.options.memSize_(2.pow(20));
 s.options.sampleRate_(sampleRate);
 s.options.numInputBusChannels_(30);
-s.options.hardwareBufferSize_(256);
+// s.options.hardwareBufferSize_(256);
 s.options.numOutputBusChannels_(30);
 s.options.recChannels_(8);
 s.options.maxSynthDefs = 2048;
@@ -17,7 +17,7 @@ s.options.outDevice_("Blackhole16_FirefaceUFXIII");
 s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 
 ~channel_offset = 16;
-~target_audio_channel = 8 + ~channel_offset;
+~target_audio_channel = 10 + ~channel_offset;
 ~room_audio_channel = 9 + ~channel_offset;
 ~inChannel = 24;
 ~outInAudio = 0;
@@ -57,41 +57,42 @@ s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 ~pythonOSCAddress = NetAddr("127.0.0.1", 3333);
 
 ~initiate = {
-/*	// Make sure we have loaded audio before starting
+	/*	// Make sure we have loaded audio before starting
 	if (~trainingAudio.isNil, {
-		"ERROR: No training audio loaded! Send /load_training_audio_path first.".postln;
+	"ERROR: No training audio loaded! Send /load_training_audio_path first.".postln;
 	}, {*/
-		~trainingSynth = Synth(\trainingAudio, [
-			\buf, ~trainingAudio,  // Use ~trainingAudio directly (current buffer)
-			\analysisBus, ~targetAudioBus,
-			\trainingAudioSel, ~trainingAudioSel,
-		\target_audio_input_chan, ~target_audio_channel,
-		\room_audio_input_chan, ~room_audio_channel,
-			\inChanOffset, ~inChannel,
-			\outChanMonitor, ~trainingOutChan,
-			\outBlackhole, ~outBlackholeTraining
-		], target: ~audioGrp);
-
-		~stringSynth = Synth(\strings, [
-			\analysisBus, ~inputAudioBus,
+	~trainingSynth = Synth(\trainingAudio, [
 		\target_audio_channel, ~target_audio_channel,
 		\room_audio_channel, ~room_audio_channel,
-			\stringGain, ~stringGain,
-			\outChan, ~parrotOutChan,
-			\outBlackhole, ~outBlackholeStrings,
-			\delayTime, ~delayTimeBus,
+		\buf, ~trainingAudio,  // Use ~trainingAudio directly (current buffer)
+		\analysisBus, ~targetAudioBus,
+		\trainingAudioSel, ~trainingAudioSel,
+		\target_audio_input_chan, ~target_audio_channel,
+		\room_audio_input_chan, ~room_audio_channel,
+		\inChanOffset, ~inChannel,
+		\outChanMonitor, ~trainingOutChan,
+		\outBlackhole, ~outBlackholeTraining
+	], target: ~audioGrp);
+
+	~stringSynth = Synth(\strings, [
+		\analysisBus, ~inputAudioBus,
+		\stringGain, ~stringGain,
+		\outChan, ~parrotOutChan,
+		\outBlackhole, ~outBlackholeStrings,
+		\delayTime, ~delayTimeBus,
 		\amp_mod_bus, ~amp_mod_bus,
+		\inChanOffset, ~channel_offset,
 		\amp_mod_balance_control, ~stringAmpControlBal
-		], target: ~audioGrp);
+	], target: ~audioGrp);
 
-		~updateTask = Task({
-			loop {
-				~updateDirection.value;
-				0.005.wait;
-			}
-		}).play;
+	~updateTask = Task({
+		loop {
+			~updateDirection.value;
+			0.005.wait;
+		}
+	}).play;
 
-/*		"Training synths started successfully".postln;
+	/*		"Training synths started successfully".postln;
 	});*/
 };
 
@@ -296,15 +297,15 @@ s.waitForBoot({
 
 	// Define SynthDefs
 	SynthDef(\trainingAudio, {
-		|buf, outChanPy, outChanMonitor, analysisBus, inChanOffset, trainingAudioSel, outBlackhole, target_audio_input_chan, room_audio_input_chan, schmitt_high = 0.1, schmitt_low = 0.01|
+		|buf, outChanPy, outChanMonitor, analysisBus, inChanOffset, trainingAudioSel, outBlackhole, target_audio_input_chan, room_audio_input_chan, schmitt_high = 0.1, schmitt_low = 0.05|
 		var src, live_input, room_audio_input, target_volume, target_volume_integrated, target_vol_trig;
 
-		live_input = SoundIn.ar(target_audio_input_chan.poll);
+		live_input = SoundIn.ar(target_audio_input_chan);
 		room_audio_input = SoundIn.ar(room_audio_input_chan);
 		target_volume = RMS.kr(live_input, 4);
-		target_volume_integrated = Integrator.kr(target_volume, 0.95).scope;
-		target_vol_trig = OnePole.kr(Schmidt.kr(target_volume_integrated, schmitt_low, schmitt_high), 0.995).scope;
-		live_input = XFade2.ar(room_audio_input, live_input, (target_vol_trig * 2) - 1).scope;
+		target_volume_integrated = Integrator.kr(target_volume, 0.95);
+		target_vol_trig = OnePole.kr(Schmidt.kr(target_volume_integrated, schmitt_low, schmitt_high), 0.99);
+		live_input = XFade2.ar(room_audio_input, live_input, (target_vol_trig * 2) - 1);
 
 		src = Select.ar(In.kr(trainingAudioSel),
 			[
@@ -336,18 +337,28 @@ s.waitForBoot({
 
 	SynthDef(\strings, {
 		|freqBus, inChanOffset, outChanPy, outChanMonitor, analysisBus, stringGain, outChan, outBlackhole, delayTime, amp_mod_bus, amp_mod_balance_control|
-		var oscArray, amp, ampDiffNeighbours, directions, sineAM, sineState, amp_mod_balance, sumSigs, sumSigsDelayed, sine_mod_array,amp_mod_array;
+		var oscArray, amp, ampDiffNeighbours, directions, sineAM, sineState, amp_mod_balance, sumSigs, sumSigsDelayed, sine_mod_array,amp_mod_array, pan_array, amp_deviation_squared, amp_variance = 0, standard_deviation = 0, mean_amps = 0;
 
 		sine_mod_array = 8.collect{};
 		amp_mod_array = 8.collect{};
 
 		// Input from 8 self-oscillating strings
 		oscArray = SoundIn.ar(8.collect{|i| inChanOffset + i});
-		oscArray = oscArray * In.kr(stringGain);
+		// oscArray = oscArray * In.kr(stringGain);
 
 		// Get amplitude of each string
 		amp = RMS.ar(oscArray, 20).ampdb.linlin(-65.0, 0.0, 0, 1.0);
 		amp = Integrator.ar(amp, In.kr(~integration_factor)).clip(0.0, 1.0);
+
+		mean_amps = amp.mean;
+
+		amp_deviation_squared = 8.collect{|i|
+			(amp[i] - mean_amps).squared;
+		};
+
+		amp_variance = amp_deviation_squared.mean;
+
+		standard_deviation = amp_variance.sqrt;
 
 		// Calculate amplitude difference between string and neighbors
 		ampDiffNeighbours = 8.collect{|i|
@@ -384,10 +395,14 @@ s.waitForBoot({
 		sumSigs = Mix(LeakDC.ar(amp_mod_balance)) * 3.0;
 		sumSigsDelayed = DelayN.ar(sumSigs, delaytime: In.kr(delayTime));
 
+		// Pan each string according to its squared deviation from the mean
+		pan_array =  PanAz.ar(4,oscArray, LFSaw.ar(amp_deviation_squared));
+
 		// Output mixed signal
 		Out.ar(outChan, [sumSigs, sumSigsDelayed]);
 		Out.ar(outBlackhole, Mix(oscArray));
-		Out.ar(~paOutChan, SplayAz.ar(4, oscArray));
+		// Out.ar(~paOutChan, SplayAz.ar(4, oscArray));
+		Out.ar(~paOutChan, pan_array);
 	}).add;
 
 	s.sync;
