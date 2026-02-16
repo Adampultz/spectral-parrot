@@ -81,6 +81,7 @@ class MotorEnvironment(gym.Env):
                 reset_wait_time=0.3,
                 reward_scale=1.0,
                 early_stopping_threshold=0.02,
+                sub_thresh_loss_count_threshold=5,
                 max_steps_without_improvement=100,
                 max_ep_length=1024,
                 use_motors=True,
@@ -88,7 +89,6 @@ class MotorEnvironment(gym.Env):
                 motor_steps=50,
                 use_variable_step_sizes: bool = False,
                 available_step_sizes: List[int] = None,
-                step_size_logits_bias: List[float] = None,
                 max_ccw_steps: List[int] = None,
                 max_cw_steps: List[int] = None,
                 cw_limit_position: int = 5000,  # Position when at CW limit (StallGuard message from ESP32)
@@ -126,8 +126,6 @@ class MotorEnvironment(gym.Env):
                 proximity_bonus_very_close=50.0,
                 episode_steps_before_breakthrough=30,
                 motors_for_movement_penalty=2,
-                observation_space_loss_max=100.0,
-                observation_space_loss_min=0.0,
                 use_early_stopping=True,              
                 use_truncation=True,                
                 min_episode_steps=1,                
@@ -183,18 +181,18 @@ class MotorEnvironment(gym.Env):
         self.reward_scale = reward_scale
         self.early_stopping_threshold = early_stopping_threshold
         self.max_steps_without_improvement = max_steps_without_improvement
+        self.sub_thresh_loss_count_threshold = sub_thresh_loss_count_threshold
         
         # Define action and observation spaces
         # Actions: 3 discrete choices per motor
         self.action_space = spaces.MultiDiscrete([3] * num_motors)
-        
-        # Update observation space with config
+
         self.observation_space = spaces.Box(
-            low=np.array([observation_space_loss_min, -1.0], dtype=np.float32),
-            high=np.array([observation_space_loss_max, 1.0], dtype=np.float32),
-            shape=(2,),
+            low=np.array([0.0] + [-1.0]*8 + [-1.0], dtype=np.float32),  # loss, 8 positions, direction
+            high=np.array([100.0] + [1.0]*8 + [1.0], dtype=np.float32),
+            shape=(10,),
             dtype=np.float32
-        )
+)
         
         # Episode tracking
         self.previous_loss = None
@@ -290,6 +288,8 @@ class MotorEnvironment(gym.Env):
         
         # Track step size usage
         self.action_step_size_counts = np.zeros(len(self.available_step_sizes), dtype=np.int64)
+
+        self.sub_thresh_loss_count = 0
 
         if self.use_motors and self.motor_controller:
             logger.info("Enabling motor drivers...")
@@ -688,15 +688,27 @@ class MotorEnvironment(gym.Env):
             )
 
             # Update positions AFTER movement confirmed
+            # Skip motors that were already recalibrated by StallGuard detection
+            stall_recalibrated = completion_info.get('stallguard_triggered', {}) if completion_info else {}
             for motor_num, (direction_str, steps) in movement_commands.items():
+                if motor_num in stall_recalibrated:
+                    logger.debug(f"Motor {motor_num} position already set by StallGuard recalibration, skipping update")
+                    continue
                 motor_idx = motor_num - 1
                 if direction_str == 'CCW':
                     self.motor_positions[motor_idx] -= steps
                 else:  # CW
                     self.motor_positions[motor_idx] += steps
                 logger.debug(f"Motor {motor_num} position updated: {self.motor_positions[motor_idx]}")
-        else:
-            time.sleep(self.step_wait_time)
+        #     for motor_num, (direction_str, steps) in movement_commands.items():
+        #         motor_idx = motor_num - 1
+        #         if direction_str == 'CCW':
+        #             self.motor_positions[motor_idx] -= steps
+        #         else:  # CW
+        #             self.motor_positions[motor_idx] += steps
+        #         logger.debug(f"Motor {motor_num} position updated: {self.motor_positions[motor_idx]}")
+        # else:
+        #     time.sleep(self.step_wait_time)
         
         # ============================================================
         # STEP 3: Get observation and calculate reward
@@ -712,9 +724,16 @@ class MotorEnvironment(gym.Env):
         # STEP 4: Check termination conditions
         # ============================================================
         terminated = False
-        if self.use_early_stopping and current_loss < self.early_stopping_threshold:
-            terminated = True
-            logger.info(f"Early stopping: loss {current_loss:.4f} < threshold {self.early_stopping_threshold}")
+
+        if self.use_early_stopping:
+            if current_loss < self.early_stopping_threshold:
+                self.sub_thresh_loss_count += 1
+                if self.sub_thresh_loss_count > self.sub_thresh_loss_count_threshold:
+                    terminated = True
+                    logger.info(f"Early stopping: loss {current_loss:.4f} < threshold {self.early_stopping_threshold}")
+                    self.sub_thresh_loss_count = 0
+            elif self.sub_thresh_loss_count > 0:
+                self.sub_thresh_loss_count -= 1
         
         # Check reward threshold if configured
         if self.reward_threshold_for_early_stop is not None:
@@ -757,122 +776,24 @@ class MotorEnvironment(gym.Env):
         }
         
         return observation, reward, terminated, truncated, info
-    
-    # def step_continuous(self, continuous_actions):
-    #     """
-    #     Execute a step with continuous actions from the gated policy.
-        
-    #     Args:
-    #         continuous_actions: Array of 8 values where:
-    #                         0 = hold
-    #                         (0, 1] = CW movement
-    #                         [-1, 0) = CCW movement
-        
-    #     Returns:
-    #         observation, reward, done, info
-    #     """
-    #     if self.done:
-    #         raise ValueError("Environment is done. Please reset.")
-        
-    #     # Convert continuous actions to motor commands
-    #     motor_commands = []
-    #     motors_moved = []
-        
-    #     for motor_id, action_value in enumerate(continuous_actions):
-    #         action_value = float(action_value)  # Convert from tensor if needed
-            
-    #         # Check if holding (exact zero or very close)
-    #         if abs(action_value) < 0.0001:
-    #             continue  # Motor holds, no command needed
-            
-    #         # Determine direction and magnitude
-    #         if action_value > 0:  # CW movement
-    #             # Map from [0.001, 1.0] to [min_steps, max_steps]
-    #             magnitude = (action_value - 0.001) / 0.999
-    #             steps = int(self.min_steps + magnitude * (self.max_steps - self.min_steps))
-    #             steps = min(steps, self.max_steps)  # Safety clamp
-    #             direction = 1
-    #             motors_moved.append(f"{motor_id+1}:CW{steps}")
-                
-    #         else:  # CCW movement  
-    #             # Map from [-1.0, -0.001] to [max_steps, min_steps]
-    #             magnitude = (abs(action_value) - 0.001) / 0.999
-    #             steps = int(self.min_steps + magnitude * (self.max_steps - self.min_steps))
-    #             steps = min(steps, self.max_steps)  # Safety clamp
-    #             direction = -1
-    #             motors_moved.append(f"{motor_id+1}:CCW{steps}")
-            
-    #         # Check position limits
-    #         new_position = self.motor_positions[motor_id] + (direction * steps)
-            
-    #         if new_position > self.position_limit:
-    #             self.logger.warning(f"Motor {motor_id+1} blocked at CW limit "
-    #                             f"(pos: {self.motor_positions[motor_id]} → {new_position}, "
-    #                             f"limit: {self.position_limit})")
-    #             continue
-    #         elif new_position < -self.position_limit:
-    #             self.logger.warning(f"Motor {motor_id+1} blocked at CCW limit "
-    #                             f"(pos: {self.motor_positions[motor_id]} → {new_position}, "
-    #                             f"limit: {-self.position_limit})")
-    #             continue
-            
-    #         # Add to command list
-    #         motor_commands.append({
-    #             'motor_id': motor_id + 1,
-    #             'direction': direction,
-    #             'steps': steps
-    #         })
-            
-    #         # Update internal position tracking
-    #         self.motor_positions[motor_id] = new_position
-        
-    #     # Execute the motor commands (same as before)
-    #     if motor_commands:
-    #         self._execute_motor_commands(motor_commands)
-        
-    #     # Wait for step completion
-    #     time.sleep(self.step_wait_time)
-        
-    #     # Get new observation and calculate reward
-    #     self.current_loss = self.get_current_loss()
-    #     observation = self._get_observation()
-    #     reward = self._calculate_reward(len(motor_commands))
-        
-    #     # Update step counter
-    #     self.current_step += 1
-        
-    #     # Check if episode is done
-    #     if self.current_step >= self.max_episode_length:
-    #         self.done = True
-    #         self.logger.info(f"Max episode length reached: {self.max_episode_length}")
-        
-    #     # Create info dict
-    #     info = {
-    #         'loss': self.current_loss,
-    #         'motors_moved': motors_moved,
-    #         'step': self.current_step,
-    #         'motor_positions': self.motor_positions.copy()
-    #     }
-        
-    #     return observation, reward, self.done, info
 
-    
     def _get_observation(self) -> np.ndarray:
-        """
-        Get current observation (loss value).
+        loss_obs = self.loss_processor.get_observation().cpu().numpy().flatten()
         
-        Returns:
-            np.ndarray: Flattened array of observation values
-            
-        Raises:
-            RuntimeError: If loss processor fails to provide observation
-        """
-        try:
-            observation = self.loss_processor.get_observation()
-            return observation.cpu().numpy().flatten()
-        except Exception as e:
-            logger.error(f"Failed to get observation: {e}")
-            raise RuntimeError("Failed to get observation") from e
+        # Normalize motor positions to [-1, 1]
+        normalized_positions = np.zeros(self.num_motors)
+        for i in range(self.num_motors):
+            range_total = self.max_cw_steps[i] + self.max_ccw_steps[i]
+            normalized_positions[i] = (self.motor_positions[i] + self.max_ccw_steps[i]) / range_total * 2 - 1
+        
+        # Combine: [loss, pos1, pos2, ..., pos8, direction]
+        observation = np.concatenate([
+            [loss_obs[0]],           # current loss
+            normalized_positions,     # 8 motor positions
+            [loss_obs[1]]            # direction
+        ])
+        return observation.astype(np.float32)
+
     
     def _wait_for_motors_completion(self, motors_moving, movement_commands, timeout=30.0, stabilization_time=2.0):
         """
@@ -924,20 +845,52 @@ class MotorEnvironment(gym.Env):
                                     motor_idx = motor_num - 1
                                     direction= self.movement_commands[motor_num][0]
                                     
+                                    # if direction == 'CW':
+                                    #     logger.info(f"✓ Motor {motor_num} hit StallGuard at CW limit")
+                                    #     # StallGuard at CW limit - we KNOW position is 5000
+                                    #     old_pos = self.motor_positions[motor_idx]
+                                    #     drift_corrected = self.max_cw_steps[motor_idx] - old_pos
+
+                                    #     commanded_steps = movement_commands.get(motor_num, (None, self.motor_steps[motor_idx]))[1]
+                                    #     if drift_corrected <= commanded_steps:
+                                    #         # Only correct for drift if motor is within the motor's step size (to avoid false calibration)
+                                    #         self.motor_positions[motor_idx] = self.max_cw_steps[motor_idx]
+                                    #         logger.info(f"  Position recalibrated: {old_pos} → {self.max_cw_steps[motor_idx]}")
+                                        
+                                    #         if abs(drift_corrected) > 50:
+                                    #             logger.warning(f"  Significant drift corrected: {drift_corrected:.0f} steps")
+
+                                    # In _wait_for_motors_completion(), replace lines 841-854:
+
                                     if direction == 'CW':
-                                        logger.info(f"✓ Motor {motor_num} hit StallGuard at CW limit")
-                                        # StallGuard at CW limit - we KNOW position is 5000
+                                        logger.info(f"✔ Motor {motor_num} hit StallGuard at CW limit")
                                         old_pos = self.motor_positions[motor_idx]
                                         drift_corrected = self.max_cw_steps[motor_idx] - old_pos
 
                                         commanded_steps = movement_commands.get(motor_num, (None, self.motor_steps[motor_idx]))[1]
                                         if drift_corrected <= commanded_steps:
-                                            # Only correct for drift if motor is within the motor's step size (to avoid false calibration)
                                             self.motor_positions[motor_idx] = self.max_cw_steps[motor_idx]
                                             logger.info(f"  Position recalibrated: {old_pos} → {self.max_cw_steps[motor_idx]}")
                                         
                                             if abs(drift_corrected) > 50:
                                                 logger.warning(f"  Significant drift corrected: {drift_corrected:.0f} steps")
+
+                                    elif direction == 'CCW':
+                                        logger.info(f"✔ Motor {motor_num} hit StallGuard at CCW limit")
+                                        old_pos = self.motor_positions[motor_idx]
+                                        target_pos = -self.max_ccw_steps[motor_idx]
+                                        drift_corrected = target_pos - old_pos
+
+                                        commanded_steps = movement_commands.get(motor_num, (None, self.motor_steps[motor_idx]))[1]
+                                        if abs(drift_corrected) <= commanded_steps:
+                                            self.motor_positions[motor_idx] = target_pos
+                                            logger.info(f"  Position recalibrated: {old_pos} → {target_pos}")
+                                        
+                                            if abs(drift_corrected) > 50:
+                                                logger.warning(f"  Significant drift corrected: {drift_corrected:.0f} steps")
+                                    
+                                    else:
+                                        logger.warning(f"  StallGuard on motor {motor_num} with unknown direction '{direction}', no recalibration")
                                     
                                     stallguard_triggered[motor_num] = True
                                     motors_pending.discard(motor_num)
