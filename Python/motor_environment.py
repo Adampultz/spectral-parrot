@@ -138,7 +138,8 @@ class MotorEnvironment(gym.Env):
                 motor_acceleration=400,                
                 motor_current_ma=1200,                 
                 enable_stallguard=True,
-                initial_episode=0):                      
+                initial_episode=0,
+                random_range=2000):                      
         """
         Initialize the motor environment.
         
@@ -254,6 +255,8 @@ class MotorEnvironment(gym.Env):
         
         self.episode_steps_before_breakthrough = episode_steps_before_breakthrough
         self.motors_for_movement_penalty = motors_for_movement_penalty
+
+        self.random_range = random_range
 
         self.use_early_stopping = use_early_stopping
         self.use_truncation = use_truncation
@@ -445,7 +448,32 @@ class MotorEnvironment(gym.Env):
                 calibrate_full_sequence(self.motor_controller, self.manual_calibration)
             elif self.reset_calibration == 1:
                 logger.info("Calibrating motors to random positions")
-                calibrate_full_sequence_with_random(self.motor_controller, self.manual_calibration)
+                cal_result = calibrate_full_sequence_with_random(
+                    self.motor_controller,
+                    self.manual_calibration,
+                    max_cw_steps=self.max_cw_steps,
+                    random_range=self.random_range
+                )
+                if cal_result:
+                    intended_positions = cal_result.get('positions', [])
+                    stopped_early      = cal_result.get('stopped_early', set())
+                    for motor_idx in range(self.num_motors):
+                        motor_num = motor_idx + 1
+                        if motor_num in stopped_early:
+                            logger.warning(
+                                f"Motor {motor_num} sent STALL DETECTED during calibration "
+                                f"despite INHIBIT_SG — position unknown, keeping stale value "
+                                f"({self.motor_positions[motor_idx]}). Check firmware timing."
+                            )
+                        elif intended_positions:
+                            env_position = intended_positions[motor_idx] + self.max_cw_steps[motor_idx]
+                            self.motor_positions[motor_idx] = env_position
+                            logger.info(
+                                f"Motor {motor_num} position synced: cal={intended_positions[motor_idx]} "
+                                f"→ env={env_position}"
+                            )
+                else:
+                    logger.warning("Calibration returned no result — motor_positions NOT updated")
             elif self.reset_calibration == 2:
                 logger.info("Skipping motor calibration - using current positions")
                 # No calibration - motors stay at current positions
@@ -876,18 +904,10 @@ class MotorEnvironment(gym.Env):
                                                 logger.warning(f"  Significant drift corrected: {drift_corrected:.0f} steps")
 
                                     elif direction == 'CCW':
-                                        logger.info(f"✔ Motor {motor_num} hit StallGuard at CCW limit")
-                                        old_pos = self.motor_positions[motor_idx]
-                                        target_pos = -self.max_ccw_steps[motor_idx]
-                                        drift_corrected = target_pos - old_pos
-
-                                        commanded_steps = movement_commands.get(motor_num, (None, self.motor_steps[motor_idx]))[1]
-                                        if abs(drift_corrected) <= commanded_steps:
-                                            self.motor_positions[motor_idx] = target_pos
-                                            logger.info(f"  Position recalibrated: {old_pos} → {target_pos}")
-                                        
-                                            if abs(drift_corrected) > 50:
-                                                logger.warning(f"  Significant drift corrected: {drift_corrected:.0f} steps")
+                                        logger.warning(
+                                            f"Motor {motor_num} stalled during CCW move at pos {self.motor_positions[motor_idx]} "
+                                            f"— mechanical resistance, position unchanged"
+                                        )
                                     
                                     else:
                                         logger.warning(f"  StallGuard on motor {motor_num} with unknown direction '{direction}', no recalibration")
