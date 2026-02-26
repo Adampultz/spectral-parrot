@@ -102,8 +102,6 @@ class MotorActorNetwork(nn.Module):
             final_layer = motor_head[-1]
             nn.init.normal_(final_layer.weight, std=0.01)
             nn.init.zeros_(final_layer.bias)
-            # Use dynamic hold_action_index instead of hardcoded 1
-            final_layer.bias.data[self.hold_action_index] = self.hold_bias
 
     def _apply_action_biases(self, logits: torch.Tensor) -> torch.Tensor:
         """
