@@ -10,6 +10,8 @@ import os
 import signal
 import json
 import gc
+import tty
+import termios
 from dataclasses import dataclass, asdict, field
 from typing import Optional
 from datetime import datetime
@@ -42,6 +44,35 @@ from osc_handler import OSCHandler, setup_signal_handlers
 # Global for signal handling
 env = None
 osc_handler = None
+
+def wait_for_spacebar(prompt: str = "All systems ready. Press SPACE to begin training..."):
+    """
+    Block until the user presses the spacebar.
+    Uses raw terminal mode so no Enter key is required.
+    Terminal settings are always restored, even if an exception occurs.
+    Press Ctrl+C to abort instead of starting.
+    """
+
+    print("\n" + "=" * 60, flush=True)
+    print(prompt, flush=True)
+    print("=" * 60 + "\n", flush=True)
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if ch == " ":
+                break
+            elif ch == "\x03":  # Ctrl+C
+                raise KeyboardInterrupt
+    finally:
+        # Always restore terminal, even on exception
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    print("Starting training...\n", flush=True)
+
 
 def signal_handler(sig, frame):
     """Handle shutdown signals gracefully."""
@@ -437,466 +468,475 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     )
     logger.info(f"✓ Hyperparameters saved to: {hyperparams_file}")
     
-    # 1. Setup audio system
-    logger.info("Setting up audio system...")
-    audio = EnhancedAudio(
-        sample_rate=config.sample_rate,
-        channels=config.channels,
-        buffer_size=config.buffer_size,
-        input_device=config.input_device,
-        enable_spectral_loss=True,
-        stft_scales=config.stft_scales,        
-        stft_window_type=config.stft_window_type,  
-        use_pyfftw=config.use_pyfftw,          
-        fft_threads=config.fft_threads,
-        use_normalized_loss=config.use_normalized_loss,
-        min_signal_threshold=config.min_signal_threshold,
-        weak_signal_penalty=config.weak_signal_penalty,
-        normalization_method=config.normalization_method        
-    )
-    
-    # 2. Create loss processor
-    logger.info("Creating loss processor...")
-    loss_processor = SimpleLossProcessor(
-        spectral_loss_calculator=audio.spectral_loss,
-        device=device,
-        step_wait_time=config.step_wait_time,
-        loss_clip_max=config.loss_clip_max,
-        averaging_window_factor=config.averaging_window_factor,
-        loss_history_buffer_size=config.loss_history_buffer_size,
-        outlier_rejection_threshold=config.outlier_rejection_threshold
-    )
-
-    loss_processor.pause() # Pause the processor immediately after creation to avoid weak signal warnings during initialization
-
-    osc_handler = OSCHandler()
-    
-    # 3. Setup motor controller
-    motor_controller = None
-    if config.use_motors:
-        logger.info(f"Connecting to motors on {config.port1} and {config.port2}...")
-        motor_controller = DualESP32StepperController(
-            config.port1, config.port2, config.baudrate, debug=False
+    try:
+        # 1. Setup audio system
+        logger.info("Setting up audio system...")
+        audio = EnhancedAudio(
+            sample_rate=config.sample_rate,
+            channels=config.channels,
+            buffer_size=config.buffer_size,
+            input_device=config.input_device,
+            enable_spectral_loss=True,
+            stft_scales=config.stft_scales,        
+            stft_window_type=config.stft_window_type,  
+            use_pyfftw=config.use_pyfftw,          
+            fft_threads=config.fft_threads,
+            use_normalized_loss=config.use_normalized_loss,
+            min_signal_threshold=config.min_signal_threshold,
+            weak_signal_penalty=config.weak_signal_penalty,
+            normalization_method=config.normalization_method        
         )
-        if not motor_controller.connect():
-            logger.warning("Failed to connect to motors, continuing without motor control")
-            config.use_motors = False
     
-    # 4. Create environment
-    logger.info("Creating motor environment...")
-    env = MotorEnvironment(
-        loss_processor=loss_processor,
-        motor_controller=motor_controller,
-        num_motors=config.num_motors,
-        motor_steps=config.per_motor_steps,
-        use_variable_step_sizes=config.use_variable_step_sizes,
-        available_step_sizes=config.available_step_sizes,
-        step_wait_time=config.step_wait_time,
-        reset_wait_time=config.reset_wait_time,
-        early_stopping_threshold=config.early_stopping_threshold,
-        sub_thresh_loss_count_threshold=config.sub_thresh_loss_count_threshold,
-        max_steps_without_improvement=config.max_steps_without_improvement,
-        use_motors=config.use_motors,
-        motor_speed=config.motor_speed,
-        reward_scale=config.reward_scale,
-        max_ccw_steps=config.max_ccw_steps,
-        max_cw_steps=config.max_cw_steps,
-        limit_penalty=config.limit_penalty,
-        adaptive_hold_bias=config.hold_bias,
-        manual_calibration=config.manual_calibration,
-        reset_calibration = config.reset_calibration,
-        target_loss=config.target_loss,
-        initial_movement_penalty=config.initial_movement_penalty,
-        final_movement_penalty=config.final_movement_penalty,
-        penalty_decay_episodes=config.penalty_decay_episodes,
-        danger_zone_ratio=config.danger_zone_ratio,
-        critical_zone_ratio=config.critical_zone_ratio,
-        ccw_safety_margin=config.ccw_safety_margin,
-        stagnation_threshold=config.stagnation_threshold,
-        stagnation_window=config.stagnation_window,
-        motor_completion_timeout=config.motor_completion_timeout,
-        stabilization_time=config.stabilization_time,
-        use_improvement_bonus=config.use_improvement_bonus,
-        use_consistency_bonus=config.use_consistency_bonus,
-        use_breakthrough_bonus=config.use_breakthrough_bonus,
-        use_movement_penalty=config.use_movement_penalty,
-        use_stagnation_penalty=config.use_stagnation_penalty,
-        use_efficiency_bonus=config.use_efficiency_bonus,
-        use_proximity_bonus=config.use_proximity_bonus,
-        improvement_bonus_weight=config.improvement_bonus_weight,
-        consistency_bonus_weight=config.consistency_bonus_weight,
-        breakthrough_bonus_weight=config.breakthrough_bonus_weight,
-        movement_penalty_weight=config.movement_penalty_weight,
-        efficiency_bonus_weight=config.efficiency_bonus_weight,
-        proximity_threshold_close=config.proximity_threshold_close,
-        proximity_threshold_very_close=config.proximity_threshold_very_close,
-        proximity_bonus_close=config.proximity_bonus_close,
-        proximity_bonus_very_close=config.proximity_bonus_very_close,
-        episode_steps_before_breakthrough=config.episode_steps_before_breakthrough,
-        motors_for_movement_penalty=config.motors_for_movement_penalty,
-        # observation_space_loss_max=config.observation_space_loss_max,
-        # observation_space_loss_min=config.observation_space_loss_min,
-        use_early_stopping=config.use_early_stopping,      
-        use_truncation=config.use_truncation,               
-        min_episode_steps=config.min_episode_steps,    
-        max_ep_length=config.max_ep_length,
-        reward_threshold_for_early_stop=config.reward_threshold_for_early_stop,  
-        log_motor_details=config.log_motor_details,
-        stallguard_threshold=config.stallguard_threshold,
-        stallguard_warnings_before_stop=config.stallguard_warnings_before_stop,
-        use_per_motor_stallguard=config.use_per_motor_stallguard,
-        per_motor_stallguard=config.per_motor_stallguard,
-        motor_acceleration=config.motor_acceleration,
-        motor_current_ma=config.motor_current_ma,
-        enable_stallguard=config.enable_stallguard,
-        initial_episode=training_state.episode if resumed else 0          
-    )
-
-    string_change_manager = StringChangeManager(
-        motor_controller=motor_controller,
-        environment=env,
-        loss_processor=loss_processor,
-        agent=None  # Will be set after agent creation
-    )
-
-    # # Create interactive controller
-    interactive_controller = InteractiveController(string_change_manager)
-    
-    logger.info("String change manager initialized - press 'h' for help")
-
-    # Create signal handlers
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    # 5. Create PPO agent if not loaded from checkpoint
-    if agent is None:
-        logger.info("Creating new PPO agent...")
-        agent = MotorPPOAgent(
-            state_dim=config.state_dim,
-            num_motors=config.num_motors,
-            num_actions_per_motor=config.get_num_actions_per_motor(),
+        # 2. Create loss processor
+        logger.info("Creating loss processor...")
+        loss_processor = SimpleLossProcessor(
+            spectral_loss_calculator=audio.spectral_loss,
             device=device,
-            hidden_size=config.hidden_size,
-            lr_actor=config.lr_actor,
-            lr_critic=config.lr_critic,
-            gamma=config.gamma,
-            gae_lambda=config.gae_lambda,
-            clip_param=config.clip_param,
-            entropy_coef=config.entropy_coef,
-            batch_size=config.batch_size,
-            hold_bias=config.hold_bias,
-            step_size_logits_bias=config.step_size_logits_bias,
-            max_grad_norm=config.max_grad_norm,
-            initial_temperature=config.initial_temperature,
-            temperature_decay=config.temperature_decay,
-            min_temperature=config.min_temperature,
-            value_coef=config.value_coef,               
-            normalize_advantages=config.normalize_advantages, 
-            normalize_returns=config.normalize_returns,       
-            use_gae=config.use_gae,
-            actor_hidden_layers=config.actor_hidden_layers,      
-            critic_hidden_layers=config.critic_hidden_layers,   
-            use_layernorm=config.use_layernorm,                 
-            dropout_rate=config.dropout_rate,                  
-            activation=config.activation_function,
-            min_step_size=config.min_step_size,
-            max_step_size=config.max_step_size,
-            step_size_bias=config.step_size_bias            
+            step_wait_time=config.step_wait_time,
+            loss_clip_max=config.loss_clip_max,
+            averaging_window_factor=config.averaging_window_factor,
+            loss_history_buffer_size=config.loss_history_buffer_size,
+            outlier_rejection_threshold=config.outlier_rejection_threshold
         )
 
-    # Start OSC server
-    logger.info("Starting OSC server")
-    osc_handler.start()
-    
-    # Start audio
-    logger.info("Starting audio system...")
-    audio.start()
+        loss_processor.pause() # Pause the processor immediately after creation to avoid weak signal warnings during initialization
 
-    logger.info("Unpausing loss processor...")
-    loss_processor.unpause()
+        osc_handler = OSCHandler()
     
-    # Wait for loss processor to be ready
-    logger.info("Waiting for loss processor...")
-    start_time = time.time()
-    while not loss_processor.is_ready() and time.time() - start_time < 15:
-        time.sleep(0.5)
+        # 3. Setup motor controller
+        motor_controller = None
+        if config.use_motors:
+            logger.info(f"Connecting to motors on {config.port1} and {config.port2}...")
+            motor_controller = DualESP32StepperController(
+                config.port1, config.port2, config.baudrate, debug=False
+            )
+            if not motor_controller.connect():
+                logger.warning("Failed to connect to motors, quitting")
+                return
     
-    if not loss_processor.is_ready():
-        logger.error("Loss processor not ready after timeout")
-        return
-    
-    logger.info("Loss processor ready!")
-    
-    # 6. Training loop (continuing from checkpoint if loaded)
-    logger.info(f"Starting/Resuming training from episode {training_state.episode + 1}...")
+        # 4. Create environment
+        logger.info("Creating motor environment...")
+        env = MotorEnvironment(
+            loss_processor=loss_processor,
+            motor_controller=motor_controller,
+            num_motors=config.num_motors,
+            motor_steps=config.per_motor_steps,
+            use_variable_step_sizes=config.use_variable_step_sizes,
+            available_step_sizes=config.available_step_sizes,
+            step_wait_time=config.step_wait_time,
+            reset_wait_time=config.reset_wait_time,
+            early_stopping_threshold=config.early_stopping_threshold,
+            sub_thresh_loss_count_threshold=config.sub_thresh_loss_count_threshold,
+            max_steps_without_improvement=config.max_steps_without_improvement,
+            use_motors=config.use_motors,
+            motor_speed=config.motor_speed,
+            reward_scale=config.reward_scale,
+            max_ccw_steps=config.max_ccw_steps,
+            max_cw_steps=config.max_cw_steps,
+            limit_penalty=config.limit_penalty,
+            adaptive_hold_bias=config.hold_bias,
+            manual_calibration=config.manual_calibration,
+            reset_calibration = config.reset_calibration,
+            target_loss=config.target_loss,
+            initial_movement_penalty=config.initial_movement_penalty,
+            final_movement_penalty=config.final_movement_penalty,
+            penalty_decay_episodes=config.penalty_decay_episodes,
+            danger_zone_ratio=config.danger_zone_ratio,
+            critical_zone_ratio=config.critical_zone_ratio,
+            ccw_safety_margin=config.ccw_safety_margin,
+            stagnation_threshold=config.stagnation_threshold,
+            stagnation_window=config.stagnation_window,
+            motor_completion_timeout=config.motor_completion_timeout,
+            stabilization_time=config.stabilization_time,
+            use_improvement_bonus=config.use_improvement_bonus,
+            use_consistency_bonus=config.use_consistency_bonus,
+            use_breakthrough_bonus=config.use_breakthrough_bonus,
+            use_movement_penalty=config.use_movement_penalty,
+            use_stagnation_penalty=config.use_stagnation_penalty,
+            use_efficiency_bonus=config.use_efficiency_bonus,
+            use_proximity_bonus=config.use_proximity_bonus,
+            improvement_bonus_weight=config.improvement_bonus_weight,
+            consistency_bonus_weight=config.consistency_bonus_weight,
+            breakthrough_bonus_weight=config.breakthrough_bonus_weight,
+            movement_penalty_weight=config.movement_penalty_weight,
+            efficiency_bonus_weight=config.efficiency_bonus_weight,
+            proximity_threshold_close=config.proximity_threshold_close,
+            proximity_threshold_very_close=config.proximity_threshold_very_close,
+            proximity_bonus_close=config.proximity_bonus_close,
+            proximity_bonus_very_close=config.proximity_bonus_very_close,
+            episode_steps_before_breakthrough=config.episode_steps_before_breakthrough,
+            motors_for_movement_penalty=config.motors_for_movement_penalty,
+            use_early_stopping=config.use_early_stopping,      
+            use_truncation=config.use_truncation,               
+            min_episode_steps=config.min_episode_steps,    
+            max_ep_length=config.max_ep_length,
+            reward_threshold_for_early_stop=config.reward_threshold_for_early_stop,  
+            log_motor_details=config.log_motor_details,
+            stallguard_threshold=config.stallguard_threshold,
+            stallguard_warnings_before_stop=config.stallguard_warnings_before_stop,
+            use_per_motor_stallguard=config.use_per_motor_stallguard,
+            per_motor_stallguard=config.per_motor_stallguard,
+            motor_acceleration=config.motor_acceleration,
+            motor_current_ma=config.motor_current_ma,
+            enable_stallguard=config.enable_stallguard,
+            initial_episode=training_state.episode if resumed else 0,
+            random_range=config.motor_random_calibration_range        
+        )
 
-    # ============================================================================
-    # AUDIO ROTATION SETUP - Send folder path to SuperCollider for buffer loading
-    # ============================================================================
-    num_training_audios = 0
-    current_audio_index = 0
+        string_change_manager = StringChangeManager(
+            motor_controller=motor_controller,
+            environment=env,
+            loss_processor=loss_processor,
+            agent=None  # Will be set after agent creation
+        )
 
-    if config.training_audio_rotation_interval > 0:
-        audio_folder = config.training_audio_folder
-
-        # Calculate rotation count - SuperCollider will do the modulo
-        rotation_count = training_state.episode // config.training_audio_rotation_interval
+        # # Create interactive controller
+        interactive_controller = InteractiveController(string_change_manager)
         
-        logger.info(f"Loading training audio from folder: {audio_folder}")
-        logger.info(f"Current episode: {training_state.episode}, Rotation interval: {config.training_audio_rotation_interval}")
-        logger.info(f"Calculated rotation count: {rotation_count}")
+        logger.info("String change manager initialized - press 'h' for help")
 
-        # Send folder path and rotation count to SuperCollider
-        # SuperCollider will count files and calculate: starting_index = rotation_count % num_files
-        osc_handler.load_training_audio_folder(audio_folder, rotation_count=rotation_count)       
+        # Create signal handlers
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
         
-        # Wait for SuperCollider to load all buffers
-        logger.info("Waiting for SuperCollider to load training audio buffers...")
-        if not osc_handler.wait_for_audio_load(timeout=15.0):
-            logger.error("Failed to load training audio files! Check SuperCollider post window for errors.")
-            logger.warning("Continuing with audio rotation disabled.")
-            config.training_audio_rotation_interval = 0
-        else:
-            num_training_audios = osc_handler.num_training_audios
-            current_audio_index = osc_handler.current_audio_index  # Get from SC, don't recalculate!
+        # 5. Create PPO agent if not loaded from checkpoint
+        if agent is None:
+            logger.info("Creating new PPO agent...")
+            agent = MotorPPOAgent(
+                state_dim=config.state_dim,
+                num_motors=config.num_motors,
+                num_actions_per_motor=config.get_num_actions_per_motor(),
+                device=device,
+                hidden_size=config.hidden_size,
+                lr_actor=config.lr_actor,
+                lr_critic=config.lr_critic,
+                gamma=config.gamma,
+                gae_lambda=config.gae_lambda,
+                clip_param=config.clip_param,
+                entropy_coef=config.entropy_coef,
+                batch_size=config.batch_size,
+                hold_bias=config.hold_bias,
+                step_size_logits_bias=config.step_size_logits_bias,
+                max_grad_norm=config.max_grad_norm,
+                initial_temperature=config.initial_temperature,
+                temperature_decay=config.temperature_decay,
+                min_temperature=config.min_temperature,
+                value_coef=config.value_coef,               
+                normalize_advantages=config.normalize_advantages, 
+                normalize_returns=config.normalize_returns,       
+                use_gae=config.use_gae,
+                actor_hidden_layers=config.actor_hidden_layers,      
+                critic_hidden_layers=config.critic_hidden_layers,   
+                use_layernorm=config.use_layernorm,                 
+                dropout_rate=config.dropout_rate,                  
+                activation=config.activation_function,
+                min_step_size=config.min_step_size,
+                max_step_size=config.max_step_size,
+                step_size_bias=config.step_size_bias            
+            )
+
+        # Start OSC server
+        logger.info("Starting OSC server")
+        osc_handler.start()
+        
+        # Start audio
+        logger.info("Starting audio system...")
+        audio.start()
+
+        logger.info("Unpausing loss processor...")
+        loss_processor.unpause()
+        
+        # Wait for loss processor to be ready
+        logger.info("Waiting for loss processor...")
+        start_time = time.time()
+        while not loss_processor.is_ready() and time.time() - start_time < 15:
+            time.sleep(0.5)
+        
+        if not loss_processor.is_ready():
+            logger.error("Loss processor not ready after timeout")
+            return
+        
+        logger.info("Loss processor ready!")
+        
+        # 6. Training loop (continuing from checkpoint if loaded)
+        logger.info(f"Starting/Resuming training from episode {training_state.episode + 1}...")
+
+        # ============================================================================
+        # AUDIO ROTATION SETUP - Send folder path to SuperCollider for buffer loading
+        # ============================================================================
+        num_training_audios = 0
+        current_audio_index = 0
+
+        if config.training_audio_rotation_interval > 0:
+            audio_folder = config.training_audio_folder
+
+            # Calculate rotation count - SuperCollider will do the modulo
+            rotation_count = training_state.episode // config.training_audio_rotation_interval
             
-            logger.info(f"✓ Successfully loaded {num_training_audios} audio files")
+            logger.info(f"Loading training audio from folder: {audio_folder}")
+            logger.info(f"Current episode: {training_state.episode}, Rotation interval: {config.training_audio_rotation_interval}")
+            logger.info(f"Calculated rotation count: {rotation_count}")
+
+            # Send folder path and rotation count to SuperCollider
+            # SuperCollider will count files and calculate: starting_index = rotation_count % num_files
+            osc_handler.load_training_audio_folder(audio_folder, rotation_count=rotation_count)       
             
-            if num_training_audios > 0:
-                logger.info(f"Will rotate audio every {config.training_audio_rotation_interval} episodes")
-                logger.info(f"")
-                logger.info(f"{'='*70}")
-                logger.info(f"AUDIO ROTATION INITIALIZED")
-                if training_state.episode > 0:
-                    logger.info(f"Resumed at episode {training_state.episode}")
-                logger.info(f"Starting with buffer #{current_audio_index + 1}/{num_training_audios}")
-                logger.info(f"{'='*70}")
-                logger.info(f"")
-                logger.info("Starting SuperCollider synths...")
-                osc_handler.client.send_message("/osc_from_python", True)
-                time.sleep(0.5)  # Give SC time to start
-            else:
-                logger.warning("No audio files loaded. Audio rotation disabled.")
+            # Wait for SuperCollider to load all buffers
+            logger.info("Waiting for SuperCollider to load training audio buffers...")
+            if not osc_handler.wait_for_audio_load(timeout=15.0):
+                logger.error("Failed to load training audio files! Check SuperCollider post window for errors.")
+                logger.warning("Continuing with audio rotation disabled.")
                 config.training_audio_rotation_interval = 0
-    else:
-        logger.info("Audio rotation disabled (training_audio_rotation_interval = 0)")
-
-    logger.info("Starting keyboard listener...")
-    interactive_controller.start()
-    logger.info("Keyboard listener active - press 'h' for help")
-      
-    while training_state.timesteps < config.total_timesteps:
-        training_state.episode += 1
-
-        if (config.training_audio_rotation_interval > 0 and 
-            num_training_audios > 0 and
-            training_state.episode % config.training_audio_rotation_interval == 0):
-
-            if string_change_manager.training_paused:
-                # Don't advance training, but keep audio active
-                time.sleep(0.1)
-                continue
-                
-            # Calculate next buffer index (wraps around)
-            current_audio_index = (current_audio_index + 1) % num_training_audios
-            
-            logger.info(f"")
-            logger.info(f"{'='*70}")
-            logger.info(f"ROTATING TRAINING AUDIO")
-            logger.info(f"Episode {training_state.episode}: Switching to buffer #{current_audio_index + 1}/{num_training_audios}")
-            logger.info(f"{'='*70}")
-            
-            # Switch to the next buffer
-            osc_handler.switch_training_audio(current_audio_index)
-            
-            # Wait for confirmation
-            if osc_handler.wait_for_audio_switch(timeout=2.0):
-                logger.info("✓ Audio rotation successful")
             else:
-                logger.warning("⚠️ Audio rotation timeout - continuing anyway")
-
-        obs, _ = env.reset()
-        
-        episode_reward = 0
-        episode_loss_sum = 0
-        
-        for step in range(config.max_ep_length):
-            # Select action - unpack all 5 values from hybrid actor
-
-            while string_change_manager and string_change_manager.training_paused:
-                time.sleep(0.1)
-                continue
-
-            motor_commands, directions, magnitudes, log_prob, value = agent.select_action(obs)
-            
-            # Pass DIRECTIONS and MAGNITUDES to environment for hybrid mode
-            next_obs, reward, terminated, truncated, info = env.step(
-                directions, 
-                magnitudes=magnitudes,
-                min_steps=config.min_step_size,
-                max_steps=config.max_step_size
-            )
-
-            if 'recommended_hold_bias' in info:
-                agent.actor.hold_bias = info['recommended_hold_bias']
-            
-            # Store transition with directions and magnitudes separately
-            agent.store_transition(obs, directions, magnitudes, log_prob, reward, value, terminated or truncated)
-            
-            # Update metrics
-            training_state.timesteps += 1
-            episode_reward += reward
-            episode_loss_sum += info['spectral_loss']
-            
-            # Log step details based on config
-            if step % config.log_frequency == 0 and config.log_motor_details:
-                if 'movement_details' in info and info['movement_details']:
-                    # Enhanced logging with step sizes
-                    movements = []
-                    for motor_num in sorted(info['motors_moved']):
-                        direction, step_size = info['movement_details'][motor_num]
-                        # Convert direction number to string
-                        dir_str = 'CCW' if direction == -1 else 'CW' if direction == 1 else 'HOLD'
-                        movements.append(f"{motor_num}:{dir_str}{step_size}")
-                    motors_str = f"[{', '.join(movements)}]" if movements else "[]"
+                num_training_audios = osc_handler.num_training_audios
+                current_audio_index = osc_handler.current_audio_index  # Get from SC, don't recalculate!
+                
+                logger.info(f"✓ Successfully loaded {num_training_audios} audio files")
+                
+                if num_training_audios > 0:
+                    logger.info(f"Will rotate audio every {config.training_audio_rotation_interval} episodes")
+                    logger.info(f"")
+                    logger.info(f"{'='*70}")
+                    logger.info(f"AUDIO ROTATION INITIALIZED")
+                    if training_state.episode > 0:
+                        logger.info(f"Resumed at episode {training_state.episode}")
+                    logger.info(f"Starting with buffer #{current_audio_index + 1}/{num_training_audios}")
+                    logger.info(f"{'='*70}")
+                    logger.info(f"")
+                    logger.info("Starting SuperCollider synths...")
+                    osc_handler.client.send_message("/osc_from_python", True)
+                    time.sleep(0.5)  # Give SC time to start
                 else:
-                    # Legacy logging
-                    motors_str = str(info['motors_moved'])
-                
-                logger.info(f"Episode {training_state.episode}, Step {step}: "
-                        f"Loss={info['spectral_loss']:.4f}, "
-                        f"Reward={reward:.2f}, Motors moved: {motors_str}")
-            
-            # Move to next state
-            obs = next_obs
-            
-            # Update policy
-            if training_state.timesteps % config.update_interval == 0:
-                with torch.no_grad():
-                    next_value = agent.critic(torch.FloatTensor(obs).to(device)).item()
-                
-                actor_loss, critic_loss = agent.update(next_value, config.n_epochs)
-                
-                logger.info(f"Update at timestep {training_state.timesteps}: "
-                          f"Actor loss={actor_loss:.4f}, Critic loss={critic_loss:.4f}, "
-                          f"Temperature={agent.current_temperature:.3f}")
-            
-            # Check if done
-            if terminated or truncated:
-                break
-        
-        # Episode complete
-        ep_length = step + 1
-        avg_loss = episode_loss_sum / ep_length
+                    logger.warning("No audio files loaded. Audio rotation disabled.")
+                    config.training_audio_rotation_interval = 0
+        else:
+            logger.info("Audio rotation disabled (training_audio_rotation_interval = 0)")
 
-        if training_state.episode % config.gc_interval == 0:
-            gc.collect()
-            # Also clean up spectral data
-            if hasattr(audio.spectral_loss, 'cleanup_old_spectral_data'):
-                audio.spectral_loss.cleanup_old_spectral_data(max_age=config.spectral_data_max_age)
-            logger.debug(f"Garbage collection at episode {training_state.episode}")
-                
-        training_state.episode_rewards.append(episode_reward)
-        training_state.episode_lengths.append(ep_length)
-        training_state.episode_losses.append(avg_loss)
-        
-        # Calculate rolling averages
-        window = min(10, len(training_state.episode_rewards))
-        avg_reward = np.mean(list(training_state.episode_rewards)[-window:])
-        avg_ep_loss = np.mean(list(training_state.episode_losses)[-window:])
-        
-        if training_state.episode % config.log_episode_summary_freq == 0:
-            logger.info(f"Episode {training_state.episode}: Reward={episode_reward:.2f}, "
-                    f"Length={ep_length}, Loss={avg_loss:.4f}, "
-                    f"Avg Reward={avg_reward:.2f}, Avg Loss={avg_ep_loss:.4f}, "
-                    f"Total Timesteps={training_state.timesteps}")
-        
-        # Position status logging
-        if config.log_action_distribution and training_state.episode % config.log_position_status_freq == 0:
-            pos_status = env.get_position_status()
-            logger.info("Motor position status:")
-            for status in pos_status:
-                logger.info(f"  Motor {status['motor']}: pos={status['confirmed_position']}, "
-                        f"uncertain={status['uncertain']}")
-            
-        # Adjust learning rate after warm-up
-        if training_state.episode == config.lr_warmup_episodes + 1:
-            agent.actor_optimizer.param_groups[0]['lr'] = config.lr_reduced_actor
-            agent.critic_optimizer.param_groups[0]['lr'] = config.lr_reduced_critic
-            logger.info(f"Reduced learning rates after {config.lr_warmup_episodes} episodes: "
-                        f"actor={config.lr_reduced_actor}, critic={config.lr_reduced_critic}")
-        
-        # Render environment occasionally
-        if training_state.episode % config.plot_frequency == 0:
-            env.render()
-        
-        # Save checkpoint
-        if training_state.episode % config.save_interval == 0:
-            checkpoint_name = f"checkpoint_ep{training_state.episode}_ts{training_state.timesteps}_r{avg_reward:.2f}.pt"
-            checkpoint_path = os.path.join(config.checkpoint_dir, checkpoint_name)
-            
-            is_best = avg_reward > training_state.best_reward
-            save_checkpoint(agent, training_state, config, checkpoint_path, is_best)
-            
-            # Update best model if needed
-            if is_best:
-                training_state.best_reward = avg_reward
-                best_path = os.path.join(config.checkpoint_dir, "best_model.pt")
-                save_checkpoint(agent, training_state, config, best_path, is_best=True)
-                logger.info(f"New best model! Avg reward: {training_state.best_reward:.2f}")
-        
-        # Plot progress
-        if training_state.episode % config.plot_save_frequency == 0:
-            plot_training_progress(
-                training_state.episode_rewards,
-                training_state.episode_losses,
-                training_state.episode_lengths,
-                save_path=os.path.join(config.results_dir, 
-                                       f"progress_ep{training_state.episode}.png"),
-                config=config
-            )
-    
-    # Training complete
-    logger.info("Training complete!")
-    
-    # Save final checkpoint
-    final_path = os.path.join(config.checkpoint_dir, "final_model.pt")
-    save_checkpoint(agent, training_state, config, final_path)
-    
-    # Final statistics
-    logger.info(f"Final statistics:")
-    logger.info(f"  Total episodes: {training_state.episode}")
-    logger.info(f"  Total timesteps: {training_state.timesteps}")
-    logger.info(f"  Best average reward: {training_state.best_reward:.2f}")
-    logger.info(f"  Final average loss: {np.mean(training_state.episode_losses[-10:]):.4f}")
-    
-    # Get action distribution stats
-    action_stats = env.get_action_distribution_stats()
-    if action_stats:
-        logger.info("\nAction distribution:")
-        for motor in range(config.num_motors):
-            ccw_pct = action_stats['action_percentages'][motor, 0]
-            hold_pct = action_stats['action_percentages'][motor, 1]
-            cw_pct = action_stats['action_percentages'][motor, 2]
-            logger.info(f"  Motor {motor+1}: CCW={ccw_pct:.1f}%, "
-                       f"HOLD={hold_pct:.1f}%, CW={cw_pct:.1f}%")
-    
-    # Cleanup
-    logger.info("Cleaning up resources...")
-    audio.stop()
-    env.close()
+        # Pause loss processor during manual start wait to suppress spurious
+        # weak-signal warnings while the user reads the terminal.
+        loss_processor.pause()
+        wait_for_spacebar()
+        loss_processor.unpause()
 
-    if interactive_controller:
+        logger.info("Starting keyboard listener...")
+        interactive_controller.start()
+        logger.info("Keyboard listener active - press 'h' for help")
+
+        while training_state.timesteps < config.total_timesteps:
+            training_state.episode += 1
+
+            if (config.training_audio_rotation_interval > 0 and 
+                num_training_audios > 0 and
+                training_state.episode % config.training_audio_rotation_interval == 0):
+
+                if string_change_manager.training_paused:
+                    # Don't advance training, but keep audio active
+                    time.sleep(0.1)
+                    continue
+                    
+                # Calculate next buffer index (wraps around)
+                current_audio_index = (current_audio_index + 1) % num_training_audios
+                
+                logger.info(f"")
+                logger.info(f"{'='*70}")
+                logger.info(f"ROTATING TRAINING AUDIO")
+                logger.info(f"Episode {training_state.episode}: Switching to buffer #{current_audio_index + 1}/{num_training_audios}")
+                logger.info(f"{'='*70}")
+                
+                # Switch to the next buffer
+                osc_handler.switch_training_audio(current_audio_index)
+                
+                # Wait for confirmation
+                if osc_handler.wait_for_audio_switch(timeout=2.0):
+                    logger.info("✓ Audio rotation successful")
+                else:
+                    logger.warning("⚠️ Audio rotation timeout - continuing anyway")
+
+            obs, _ = env.reset()
+            
+            episode_reward = 0
+            episode_loss_sum = 0
+            
+            for step in range(config.max_ep_length):
+                # Select action - unpack all 5 values from hybrid actor
+
+                while string_change_manager and string_change_manager.training_paused:
+                    time.sleep(0.1)
+                    continue
+
+                motor_commands, directions, magnitudes, log_prob, value = agent.select_action(obs)
+                
+                # Pass DIRECTIONS and MAGNITUDES to environment for hybrid mode
+                next_obs, reward, terminated, truncated, info = env.step(
+                    directions, 
+                    magnitudes=magnitudes,
+                    min_steps=config.min_step_size,
+                    max_steps=config.max_step_size
+                )
+
+                if 'recommended_hold_bias' in info:
+                    agent.actor.hold_bias = info['recommended_hold_bias']
+                
+                # Store transition with directions and magnitudes separately
+                agent.store_transition(obs, directions, magnitudes, log_prob, reward, value, terminated or truncated)
+                
+                # Update metrics
+                training_state.timesteps += 1
+                episode_reward += reward
+                episode_loss_sum += info['spectral_loss']
+                
+                # Log step details based on config
+                if step % config.log_frequency == 0 and config.log_motor_details:
+                    if 'movement_details' in info and info['movement_details']:
+                        # Enhanced logging with step sizes
+                        movements = []
+                        for motor_num in sorted(info['motors_moved']):
+                            direction, step_size = info['movement_details'][motor_num]
+                            # Convert direction number to string
+                            dir_str = 'CCW' if direction == -1 else 'CW' if direction == 1 else 'HOLD'
+                            movements.append(f"{motor_num}:{dir_str}{step_size}")
+                        motors_str = f"[{', '.join(movements)}]" if movements else "[]"
+                    else:
+                        # Legacy logging
+                        motors_str = str(info['motors_moved'])
+                    
+                    logger.info(f"Episode {training_state.episode}, Step {step}: "
+                            f"Loss={info['spectral_loss']:.4f}, "
+                            f"Reward={reward:.2f}, Motors moved: {motors_str}")
+                
+                # Move to next state
+                obs = next_obs
+                
+                # Update policy
+                if training_state.timesteps % config.update_interval == 0:
+                    with torch.no_grad():
+                        next_value = agent.critic(torch.FloatTensor(obs).to(device)).item()
+                    
+                    actor_loss, critic_loss = agent.update(next_value, config.n_epochs)
+                    
+                    logger.info(f"Update at timestep {training_state.timesteps}: "
+                            f"Actor loss={actor_loss:.4f}, Critic loss={critic_loss:.4f}, "
+                            f"Temperature={agent.current_temperature:.3f}")
+                
+                # Check if done
+                if terminated or truncated:
+                    break
+            
+            # Episode complete
+            ep_length = step + 1
+            avg_loss = episode_loss_sum / ep_length
+
+            if training_state.episode % config.gc_interval == 0:
+                gc.collect()
+                # Also clean up spectral data
+                if hasattr(audio.spectral_loss, 'cleanup_old_spectral_data'):
+                    audio.spectral_loss.cleanup_old_spectral_data(max_age=config.spectral_data_max_age)
+                logger.debug(f"Garbage collection at episode {training_state.episode}")
+                    
+            training_state.episode_rewards.append(episode_reward)
+            training_state.episode_lengths.append(ep_length)
+            training_state.episode_losses.append(avg_loss)
+            
+            # Calculate rolling averages
+            window = min(10, len(training_state.episode_rewards))
+            avg_reward = np.mean(list(training_state.episode_rewards)[-window:])
+            avg_ep_loss = np.mean(list(training_state.episode_losses)[-window:])
+            
+            if training_state.episode % config.log_episode_summary_freq == 0:
+                logger.info(f"Episode {training_state.episode}: Reward={episode_reward:.2f}, "
+                        f"Length={ep_length}, Loss={avg_loss:.4f}, "
+                        f"Avg Reward={avg_reward:.2f}, Avg Loss={avg_ep_loss:.4f}, "
+                        f"Total Timesteps={training_state.timesteps}")
+            
+            # Position status logging
+            if config.log_action_distribution and training_state.episode % config.log_position_status_freq == 0:
+                pos_status = env.get_position_status()
+                logger.info("Motor position status:")
+                for status in pos_status:
+                    logger.info(f"  Motor {status['motor']}: pos={status['confirmed_position']}, "
+                            f"uncertain={status['uncertain']}")
+                
+            # Adjust learning rate after warm-up
+            if training_state.episode == config.lr_warmup_episodes + 1:
+                agent.actor_optimizer.param_groups[0]['lr'] = config.lr_reduced_actor
+                agent.critic_optimizer.param_groups[0]['lr'] = config.lr_reduced_critic
+                logger.info(f"Reduced learning rates after {config.lr_warmup_episodes} episodes: "
+                            f"actor={config.lr_reduced_actor}, critic={config.lr_reduced_critic}")
+            
+            # Render environment occasionally
+            if training_state.episode % config.plot_frequency == 0:
+                env.render()
+            
+            # Save checkpoint
+            if training_state.episode % config.save_interval == 0:
+                checkpoint_name = f"checkpoint_ep{training_state.episode}_ts{training_state.timesteps}_r{avg_reward:.2f}.pt"
+                checkpoint_path = os.path.join(config.checkpoint_dir, checkpoint_name)
+                
+                is_best = avg_reward > training_state.best_reward
+
+                if is_best:
+                    training_state.best_reward = avg_reward
+
+                save_checkpoint(agent, training_state, config, checkpoint_path, is_best)
+                
+                # Update best model if needed
+                if is_best:
+                    best_path = os.path.join(config.checkpoint_dir, "best_model.pt")
+                    save_checkpoint(agent, training_state, config, best_path, is_best=True)
+                    logger.info(f"New best model! Avg reward: {training_state.best_reward:.2f}")
+            
+            # Plot progress
+            if training_state.episode % config.plot_save_frequency == 0:
+                plot_training_progress(
+                    training_state.episode_rewards,
+                    training_state.episode_losses,
+                    training_state.episode_lengths,
+                    save_path=os.path.join(config.results_dir, 
+                                        f"progress_ep{training_state.episode}.png"),
+                    config=config
+                )
+        
+        # Training complete
+        logger.info("Training complete!")
+        
+        # Save final checkpoint
+        final_path = os.path.join(config.checkpoint_dir, "final_model.pt")
+        save_checkpoint(agent, training_state, config, final_path)
+        
+        # Final statistics
+        logger.info(f"Final statistics:")
+        logger.info(f"  Total episodes: {training_state.episode}")
+        logger.info(f"  Total timesteps: {training_state.timesteps}")
+        logger.info(f"  Best average reward: {training_state.best_reward:.2f}")
+        logger.info(f"  Final average loss: {np.mean(training_state.episode_losses[-10:]):.4f}")
+        
+        # Get action distribution stats
+        action_stats = env.get_action_distribution_stats()
+        if action_stats:
+            logger.info("\nAction distribution:")
+            for motor in range(config.num_motors):
+                ccw_pct = action_stats['action_percentages'][motor, 0]
+                hold_pct = action_stats['action_percentages'][motor, 1]
+                cw_pct = action_stats['action_percentages'][motor, 2]
+                logger.info(f"  Motor {motor+1}: CCW={ccw_pct:.1f}%, "
+                        f"HOLD={hold_pct:.1f}%, CW={cw_pct:.1f}%")
+
+    finally:
+        # Cleanup — always runs, even on early return or exception
+        logger.info("Cleaning up resources...")
+        
+        if 'audio' in locals() and audio is not None:
+            audio.stop()
+        if 'env' in locals():
+            env.close()
+        if 'interactive_controller' in locals() and interactive_controller:
             interactive_controller.stop()
-            
-        # Ensure all string changes are complete
-    if string_change_manager and string_change_manager.active_string_changes:
-        logger.warning("Completing pending string changes before exit...")
-        string_change_manager.complete_all_string_changes()
-
-    if 'osc_handler' in locals():
-        logger.info("Stopping SuperCollider synths...")
-        osc_handler.cleanup()
+        if 'string_change_manager' in locals() and string_change_manager and string_change_manager.active_string_changes:
+            logger.warning("Completing pending string changes before exit...")
+            string_change_manager.complete_all_string_changes()
+        if 'osc_handler' in locals() and osc_handler is not None:
+            logger.info("Stopping SuperCollider synths...")
+            osc_handler.cleanup()
 
 
 def plot_training_progress(rewards, losses, lengths, save_path, config):
