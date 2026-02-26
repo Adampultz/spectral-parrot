@@ -359,9 +359,15 @@ def calibrate_random_position(controller, center_position=-4000, random_range=20
         speed: Movement speed (default: 200)
         manual_calibration: Whether to ask for user confirmation
     """
+
+    if isinstance(center_position, (list, tuple)):
+        center_positions = center_position
+    else:
+        center_positions = [center_position] * 8
+
     # Generate random offsets for each motor
     random_offsets = [random.randint(-random_range, random_range) for _ in range(8)]
-    target_positions = [center_position + offset for offset in random_offsets]
+    target_positions = [c + offset for c, offset in zip(center_positions, random_offsets)]
     
     print("\n" + "="*60)
     print("CALIBRATION: Moving to Random Positions")
@@ -576,7 +582,7 @@ def calibrate_full_sequence(controller, manual_calibration=False):
     print("  2. Fine-tune individual motor positions")
     print("  3. Save this as your standard starting position")
 
-def calibrate_full_sequence_with_random(controller, manual_calibration=False):
+def calibrate_full_sequence_with_random(controller, manual_calibration=False, max_cw_steps=None, random_range=2000):
     """
     Full calibration sequence with random positioning:
     1. Find CW limits using StallGuard
@@ -612,7 +618,14 @@ def calibrate_full_sequence_with_random(controller, manual_calibration=False):
     
     # Step 2: Move to random positions
     print("\n--- STEP 2: Moving to Random Positions ---")
-    result = calibrate_random_position(controller, speed=motor_speed, manual_calibration=False)
+    center_positions = [-v for v in max_cw_steps] if max_cw_steps else [-4000] * 8
+    result = calibrate_random_position(
+        controller,
+        random_range=random_range,
+        center_position=center_positions,
+        speed=motor_speed,
+        manual_calibration=False,
+    )
     
     print("\n" + "="*70)
     print("✅ RANDOMIZED CALIBRATION COMPLETE")
@@ -885,7 +898,18 @@ def interactive_motor_positioning(port1, port2, baudrate=115200):
                     except ValueError:
                         print("Invalid motor number")
                 elif cal_type == "random":
-                    calibrate_random_position(motor_controller, manual_calibration=manual_calibration)
+                    import json
+                    with open('config.json', 'r') as f:
+                        cfg = json.load(f)
+                    max_cw_steps = cfg.get('max_cw_steps', [4500] * 8)
+                    random_range = cfg.get('calibration_random_range', 2000)
+                    center_positions = [-v for v in max_cw_steps]
+                    calibrate_random_position(
+                        motor_controller,
+                        center_position=center_positions,
+                        random_range=random_range,
+                        manual_calibration=manual_calibration
+                    )
                 else:
                     print("Unknown calibration command")
                 
