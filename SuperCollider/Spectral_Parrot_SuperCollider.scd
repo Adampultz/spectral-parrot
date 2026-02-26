@@ -307,7 +307,7 @@ s.waitForBoot({
 		target_vol_trig = OnePole.kr(Schmidt.kr(target_volume_integrated, schmitt_low, schmitt_high), 0.99);
 		live_input = XFade2.ar(room_audio_input, live_input, (target_vol_trig * 2) - 1);
 
-		src = Select.ar(In.kr(trainingAudioSel),
+		src = Select.ar(In.kr(trainingAudioSel).asInteger,
 			[
 				// Mode 0: Audio input
 				live_input,
@@ -329,7 +329,7 @@ s.waitForBoot({
 		);
 
 		src = HPF.ar(src, 30);
-		src = LPF.ar(src, 2100);
+		src = LPF.ar(src, 5000);
 
 		Out.ar(outBlackhole, src);
 		Out.ar(outChanMonitor, [src, src]);
