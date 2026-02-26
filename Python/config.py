@@ -1,6 +1,7 @@
 # config.py
 """
 Configuration management for Spectral Parrot training.
+After changing parameters, run $ Python config.py 
 """
 
 from dataclasses import dataclass, field, asdict
@@ -17,8 +18,10 @@ class TrainingConfig:
     # Environment Configuration
     # ========================================
     num_motors: int = 8
+    state_dim: int = 10  # Observation size: loss + 8 motor positions + direction
     early_stopping_threshold: float = 0.5 # The spectral loss threshold below which an episode will be terminated
-    max_steps_without_improvement: int = 800 # If no improvement has happened, the episode will terminate
+    sub_thresh_loss_count_threshold: int = 5 # How many continuous counts of losses below the early stopping threshold before stopping
+    max_steps_without_improvement: int = 1100 # If no improvement has happened, the episode will terminate
     
     # ========================================
     # Motor Control
@@ -26,34 +29,35 @@ class TrainingConfig:
     use_motors: bool = True
     manual_calibration: bool = False # Set to True if you wish to calibrate the motors prior to training. See the README file on motor positioning
     motor_speed: int = 200 
-    # motor_steps: int = 25 # How many steps a motor will move per learning step
     use_variable_step_sizes = False
     available_step_sizes = [25, 50, 75, 100]
     step_size_logits_bias: Optional[List[float]] = None
     step_wait_time: float = 0.5 # The time in seconds between the termination of all motors and the next step. 
     reset_wait_time: float = 2 # The time in seconds to allow the strings to settle after an episode reset (which includes motor recalibration)
     reset_calibration: int = 1  # 0: center, 1: random, 2: skip
+    hold_bias: float = 3.0 # The higher the value, the more prone the network is to turn fewer motors
     
     # Motor position limits (per motor)
     # Maximum steps in each direction from the center. cw should correspond to when the tuner hits its mechanical limit, while ccw is set as the limit 
     # beyond which strings get too slack to vibrate.
     max_ccw_steps: List[int] = field(default_factory=lambda: [4000, 4000, 4000, 4000, 4500, 4500, 4500, 4500])
     max_cw_steps: List[int] = field(default_factory=lambda: [4500, 4500, 4500, 4500, 4500, 4500, 4500, 4500])
+    motor_random_calibration_range: int = 2500
     danger_zone_ratio: float = 0.1               # Start penalties at 10% from limit
     critical_zone_ratio: float = 0.02            # Severe penalties at 2% from limit
     ccw_safety_margin: int = 200                 # Safety margin before CCW limit
-    limit_penalty: float = 0.0                  # Penalty for hitting limit
+    limit_penalty: float = 3.0                  # Penalty for hitting limit
 
     min_step_size: int = 10
-    max_step_size: int = 100
-    step_size_bias: float = 1.2
+    max_step_size: int = 500
+    step_size_bias: float = 2.0  # Values larger than 1 biases toward smaller step sizes
 
     # ========================================
     # PPO Hyperparameters
     # ========================================
     total_timesteps: int = 100000
     max_ep_length: int = 1024
-    update_interval: int = 256
+    update_interval: int = 512 # Down from 256
     batch_size: int = 64
     n_epochs: int = 10
     
@@ -89,7 +93,6 @@ class TrainingConfig:
     # Network Architecture
     # ========================================
     hidden_size: int = 64
-    hold_bias: float = 1.0 # The higher the value, the more prone the network is to turn fewer motors
     
     # ========================================
     # Spectral Loss Normalization
@@ -108,8 +111,8 @@ class TrainingConfig:
     # Reward Shaping (NEW)
     # ========================================
     target_loss: float = 7.0                    # Baseline loss for reward calculation
-    initial_movement_penalty: float = 0.0        # Early training movement penalty
-    final_movement_penalty: float = 0.0          # Late training movement penalty
+    initial_movement_penalty: float = 0.5        # Early training movement penalty
+    final_movement_penalty: float = 0.1          # Late training movement penalty
     penalty_decay_episodes: int = 50             # Episodes to decay penalty over
     
     # ========================================
@@ -128,9 +131,9 @@ class TrainingConfig:
     # Reward Function Components (NEW)
     # ========================================
     use_improvement_bonus: bool = True           # Use improvement over previous loss
-    use_consistency_bonus: bool = False          # Use consistent improvement bonus
+    use_consistency_bonus: bool = True          # Use consistent improvement bonus
     use_breakthrough_bonus: bool = True          # Use breakthrough to new best
-    use_movement_penalty: bool = False           # Penalize excessive movements
+    use_movement_penalty: bool = True           # Penalize excessive movements
     use_stagnation_penalty: bool = False         # Penalize lack of progress
     use_efficiency_bonus: bool = False           # Bonus for fewer motors
     use_proximity_bonus: bool = False            # Bonus near target
@@ -152,7 +155,7 @@ class TrainingConfig:
     # Episode Behavior
     # ========================================
     episode_steps_before_breakthrough: int = 30  # Min steps before breakthrough bonus
-    motors_for_movement_penalty: int = 4         # Penalize if more than this many move
+    motors_for_movement_penalty: int = 2         # Penalize if more than this many move
     observation_space_loss_max: float = 100.0    # Max loss for observation space
     observation_space_loss_min: float = 0.0      # Min loss for observation space
 
@@ -168,7 +171,7 @@ class TrainingConfig:
     # ========================================
     # Action Distribution
     # ========================================
-    action_hold_initial_bias: float = 2.0        # Initial bias toward HOLD action
+    action_hold_initial_bias: float = 3.0        # Initial bias toward HOLD action
     action_exploration_decay: bool = True        # Decay exploration over time
     
     # ========================================
@@ -316,7 +319,7 @@ class TrainingConfig:
     # Training data management
     # ========================================
     training_audio_rotation_interval: int = 5  # Change audio every N episodes (0 = disabled)
-    training_audio_folder: str = "/Users/adammac2023/Documents/Musik-business/Projects/Spectral Parrot/Audio/Training Audio/Nov_13th_mono"    
+    training_audio_folder: str = "/Users/adammac2023/Documents/Musik-business/Projects/Spectral Parrot/Audio/Training Audio/Sonorities"    
     # ========================================
     # Helper Methods
     # ========================================
