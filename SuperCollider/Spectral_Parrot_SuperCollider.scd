@@ -82,13 +82,14 @@ s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 		\delayTime, ~delayTimeBus,
 		\amp_mod_bus, ~amp_mod_bus,
 		\inChanOffset, ~channel_offset,
-		\amp_mod_balance_control, ~stringAmpControlBal
+		\amp_mod_balance_control, ~stringAmpControlBal,
+
 	], target: ~audioGrp);
 
 	~updateTask = Task({
 		loop {
 			~updateDirection.value;
-			0.005.wait;
+			0.01.wait;
 		}
 	}).play;
 
@@ -229,7 +230,7 @@ createOSCHandler = {|name, key, port|
 					"SuperCollider shutting down synths".postln;
 					{
 						if (~trainingSynth.notNil, { ~trainingSynth.free });
-						if (~stringSynth.notNil, { ~stringSynth.free });
+						if (~stringSynth.notNil, { ~stringSynth.set(\gate, 0)});
 						if (~updateTask.notNil, { ~updateTask.stop });
 						s.sync;
 						running = false;
@@ -336,14 +337,16 @@ s.waitForBoot({
 	}).add;
 
 	SynthDef(\strings, {
-		|freqBus, inChanOffset, outChanPy, outChanMonitor, analysisBus, stringGain, outChan, outBlackhole, delayTime, amp_mod_bus, amp_mod_balance_control|
-		var oscArray, amp, ampDiffNeighbours, directions, sineAM, sineState, amp_mod_balance, sumSigs, sumSigsDelayed, sine_mod_array,amp_mod_array, pan_array, amp_deviation_squared, amp_variance = 0, standard_deviation = 0, mean_amps = 0;
+		|freqBus, inChanOffset, outChanPy, outChanMonitor, analysisBus, stringGain, outChan, outBlackhole, delayTime, amp_mod_bus, amp_mod_balance_control, gate = 1.0|
+		var oscArray, amp, ampDiffNeighbours, directions, sineAM, sineState, amp_mod_balance, sumSigs, sumSigsDelayed, sine_mod_array,amp_mod_array, pan_array, amp_deviation_squared, amp_variance = 0, standard_deviation = 0, mean_amps = 0, env;
 
 		sine_mod_array = 8.collect{};
 		amp_mod_array = 8.collect{};
 
+		env = EnvGen.kr(Env.asr(3, 1, 10), gate.poll, doneAction: 2);
+
 		// Input from 8 self-oscillating strings
-		oscArray = SoundIn.ar(8.collect{|i| inChanOffset + i});
+		oscArray = SoundIn.ar(8.collect{|i| inChanOffset + i}) * env;
 		// oscArray = oscArray * In.kr(stringGain);
 
 		// Get amplitude of each string
@@ -396,7 +399,7 @@ s.waitForBoot({
 		sumSigsDelayed = DelayN.ar(sumSigs, delaytime: In.kr(delayTime));
 
 		// Pan each string according to its squared deviation from the mean
-		pan_array =  PanAz.ar(4,oscArray, LFSaw.ar(amp_deviation_squared));
+		pan_array =  PanAz.ar(4, oscArray, LFSaw.ar(amp_deviation_squared));
 
 		// Output mixed signal
 		Out.ar(outChan, [sumSigs, sumSigsDelayed]);
