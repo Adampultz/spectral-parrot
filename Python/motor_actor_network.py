@@ -275,7 +275,12 @@ class MotorActorNetwork(nn.Module):
         magnitude_entropies = torch.stack([
             dist.entropy() for dist in magnitude_dists
         ], dim=-1)
-        
+
+        # Mask out magnitude contributions for HOLD actions
+        hold_mask = (directions == self.hold_action_index)
+        magnitude_log_probs = magnitude_log_probs * (~hold_mask).float()
+        magnitude_entropies = magnitude_entropies * (~hold_mask).float()
+
         # Combined values
         total_log_prob = direction_log_probs.sum(dim=-1) + magnitude_log_probs.sum(dim=-1)
         total_entropy = direction_entropies.sum(dim=-1) + magnitude_entropies.sum(dim=-1)
