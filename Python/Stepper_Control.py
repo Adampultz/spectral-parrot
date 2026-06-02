@@ -460,6 +460,8 @@ if __name__ == "__main__":
     parser.add_argument('--baudrate', type=int, default=115200, help='Baud rate')
     parser.add_argument('--debug', action='store_true', help='Enable debug output')
     parser.add_argument('--test', action='store_true', help='Run test sequence')
+    parser.add_argument('--motor-speed', type=int, default=2, help='Motor speed')
+    parser.add_argument('--motor-steps', type=int, default=100, help='Steps per motor movement')
     
     args = parser.parse_args()
     
