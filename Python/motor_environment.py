@@ -1045,10 +1045,10 @@ class MotorEnvironment(gym.Env):
             'motors_pending': list(motors_pending),
             'movement_phase_duration': movement_phase_duration,
             'total_duration': total_time,
-            'all_completed': len(motors_pending) == 0
+            'all_completed': len(motors_pending) == 0,
+            'stallguard_triggered': stallguard_triggered
         }
-    
-    
+     
     def _calculate_sophisticated_reward(self, current_loss, motors_moving_count=0):
         """
         Calculate reward with configurable components.
