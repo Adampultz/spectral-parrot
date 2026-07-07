@@ -3,6 +3,7 @@ import time
 import argparse
 import threading
 import logging
+from collections import deque
 
 logger = logging.getLogger(__name__)
 class DualESP32StepperController:
@@ -43,8 +44,11 @@ class DualESP32StepperController:
         }
         
         # Response queues for each ESP32
-        self.responses1 = []
-        self.responses2 = []
+        # Deques: listener append and popleft are thread-safe, so draining via
+        # popleft cannot lose messages (unlike copy-then-clear on a list).
+        # The listener threads capture these objects at start - never reassign them.
+        self.responses1 = deque()
+        self.responses2 = deque()
         
         # Listener threads
         self.listeners = []
@@ -172,28 +176,35 @@ class DualESP32StepperController:
                 print(f"Error in listener for ESP32 #{esp_num}: {e}")
                 time.sleep(0.1)
     
+    @staticmethod
+    def _drain_responses(response_queue):
+        """Atomically drain a response deque one message at a time.
+        popleft() is thread-safe against the listener's append(), so no
+        message arriving during the drain can be lost."""
+        responses = []
+        while True:
+            try:
+                responses.append(response_queue.popleft())
+            except IndexError:
+                return responses
+
     def get_responses(self, esp_num=None, clear=True):
         """Get responses from the ESP32s"""
         if esp_num == 1:
-            responses = self.responses1.copy()
-            if clear:
-                self.responses1.clear()
-            return responses
+            return self._drain_responses(self.responses1) if clear else list(self.responses1)
         elif esp_num == 2:
-            responses = self.responses2.copy()
-            if clear:
-                self.responses2.clear()
-            return responses
+            return self._drain_responses(self.responses2) if clear else list(self.responses2)
         else:
             # Get responses from both ESP32s
-            responses = {
-                1: self.responses1.copy(),
-                2: self.responses2.copy()
-            }
             if clear:
-                self.responses1.clear()
-                self.responses2.clear()
-            return responses
+                return {
+                    1: self._drain_responses(self.responses1),
+                    2: self._drain_responses(self.responses2)
+                }
+            return {
+                1: list(self.responses1),
+                2: list(self.responses2)
+            }
     
     def configure_stallguard(self, threshold=150, warnings_before_stop=10):
         """
