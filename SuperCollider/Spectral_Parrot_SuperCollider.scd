@@ -17,8 +17,8 @@ s.options.outDevice_("Blackhole16_FirefaceUFXIII");
 s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 
 ~channel_offset = 16;
-~target_audio_channel = 10 + ~channel_offset;
-~room_audio_channel = 9 + ~channel_offset;
+~target_audio_channel = 10 + ~channel_offset; // Currently bass pickup
+~room_audio_channel = 9 + ~channel_offset; // Room microphone
 ~inChannel = 24;
 ~outInAudio = 0;
 ~outTargetAudio = 1;
@@ -28,7 +28,7 @@ s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 ~outBlackholeTraining = 0;
 ~outBlackholeStrings = 1;
 ~currentTrainingAudioIndex = 0;
-~delayTime = 0.002; // to compensate for phase issues between the two speakers
+~delayTime = 0.002; // to compensate for phase differences between the two speakers
 
 ~minFreq = 40;
 ~maxfreq = 2000;
@@ -89,7 +89,7 @@ s.options.inDevice_("Blackhole16_FirefaceUFXIII");
 	~updateTask = Task({
 		loop {
 			~updateDirection.value;
-			0.01.wait;
+			0.02.wait;
 		}
 	}).play;
 
@@ -305,7 +305,7 @@ s.waitForBoot({
 		room_audio_input = SoundIn.ar(room_audio_input_chan);
 		target_volume = RMS.kr(live_input, 4);
 		target_volume_integrated = Integrator.kr(target_volume, 0.95);
-		target_vol_trig = OnePole.kr(Schmidt.kr(target_volume_integrated, schmitt_low, schmitt_high), 0.99);
+		target_vol_trig = OnePole.kr(Schmidt.kr(target_volume_integrated, schmitt_low, schmitt_high), 0.99).scope;
 		live_input = XFade2.ar(room_audio_input, live_input, (target_vol_trig * 2) - 1);
 
 		src = Select.ar(In.kr(trainingAudioSel).asInteger,
