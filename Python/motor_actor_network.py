@@ -150,7 +150,9 @@ class MotorActorNetwork(nn.Module):
             logits = logits.squeeze(1)
             
             # Apply temperature scaling for exploration
-            if self.training and self.temperature != 1.0:
+            # (mode-independent: sample() runs in eval mode, evaluate() in train
+            # mode - both must see identical logits for valid PPO ratios)
+            if self.temperature != 1.0:
                 logits = logits / self.temperature
             
             action_dists.append(Categorical(logits=logits))
@@ -222,13 +224,16 @@ class MotorActorNetwork(nn.Module):
         direction_values = direction_map[directions]
         
         # Apply HOLD mask
-        hold_mask = (directions == 1)
+        hold_mask = (directions == self.hold_action_index)
         step_sizes = step_sizes * (~hold_mask).float()
         magnitude_biased = magnitude_biased * (~hold_mask).float()
-        
+
+        # Mask out magnitude contributions for HOLD actions (must match evaluate())
+        magnitude_log_probs = magnitude_log_probs * (~hold_mask).float()
+
         # Final motor commands
         motor_commands = direction_values * step_sizes
-        
+
         # Combined log probability (sum over all motors)
         total_log_prob = direction_log_probs.sum(dim=-1) + magnitude_log_probs.sum(dim=-1)
         

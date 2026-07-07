@@ -69,9 +69,8 @@ class MotorPPOAgent:
                  initial_temperature=2.0,
                  temperature_decay=0.998,
                  min_temperature=0.3, 
-                 normalize_advantages=True,   
-                 normalize_returns=False,         
-                 use_gae=True, 
+                 normalize_advantages=True,
+                 use_gae=True,
                  actor_hidden_layers=[64, 64],     
                  critic_hidden_layers=[64, 64],   
                  use_layernorm=True,              
@@ -148,7 +147,6 @@ class MotorPPOAgent:
     
         self.value_coef = value_coef
         self.normalize_advantages = normalize_advantages
-        self.normalize_returns = normalize_returns
         self.use_gae = use_gae
         
     def select_action(self, state):
@@ -166,6 +164,11 @@ class MotorPPOAgent:
                 value: Estimated value of the state
             """
             state_tensor = torch.FloatTensor(state).to(self.device)
+
+            # Eval mode for rollouts: dropout off, so the stored log_probs match
+            # what evaluate() recomputes during the PPO update
+            self.actor.eval()
+            self.critic.eval()
 
             with torch.no_grad():
                 # Get hybrid actions from actor
@@ -198,17 +201,16 @@ class MotorPPOAgent:
         Returns:
             actor_loss, critic_loss: Average losses
         """
+        # Train mode for gradient updates (select_action switches back to eval)
+        self.actor.train()
+        self.critic.train()
+
         # Compute returns and advantages
         if self.use_gae:
             returns = self.compute_gae(next_value)
         else:
             # Simple discounted returns
             returns = self._compute_simple_returns(next_value)
-
-        if self.normalize_returns and len(returns) > 1:
-            returns_array = np.array(returns)
-            returns = (returns_array - returns_array.mean()) / (returns_array.std() + 1e-8)
-            returns = returns.tolist()
 
         logger.debug(f"GAE Returns stats: min={min(returns):.2f}, max={max(returns):.2f}, "
                 f"mean={np.mean(returns):.2f}, std={np.std(returns):.2f}")
@@ -313,11 +315,12 @@ class MotorPPOAgent:
         
         returns = []
         R = next_value
-        
+
         for step in reversed(range(len(rewards))):
             R = rewards[step] + self.gamma * R * (1 - dones[step])
-            returns.insert(0, R)
-        
+            returns.append(R)
+
+        returns.reverse()
         return returns
     
     def compute_gae(self, next_value):
@@ -328,12 +331,13 @@ class MotorPPOAgent:
         
         returns = []
         gae = 0
-        
+
         for step in reversed(range(len(rewards))):
             delta = rewards[step] + self.gamma * values[step + 1] * (1 - dones[step]) - values[step]
             gae = delta + self.gamma * self.gae_lambda * (1 - dones[step]) * gae
-            returns.insert(0, gae + values[step])
-            
+            returns.append(gae + values[step])
+
+        returns.reverse()
         return returns
     
     def save(self, path):
