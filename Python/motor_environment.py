@@ -94,7 +94,8 @@ class MotorEnvironment(gym.Env):
                 cw_limit_position: int = 5000,  # Position when at CW limit (StallGuard message from ESP32)
                 auto_recalibrate: bool = True,   # Auto-recalibrate on StallGuard
                 limit_penalty=5.0,
-                adaptive_hold_bias=1.0,
+                adaptive_hold_bias_normal=1.7,
+                adaptive_hold_bias_stagnant=0.8,
                 manual_calibration=True,
                 reset_calibration=0,
                 target_loss=15.0,
@@ -172,7 +173,8 @@ class MotorEnvironment(gym.Env):
         self.motor_steps = motor_steps
         self.use_variable_step_sizes = use_variable_step_sizes
 
-        self.adaptive_hold_bias = adaptive_hold_bias
+        self.adaptive_hold_bias_normal = adaptive_hold_bias_normal
+        self.adaptive_hold_bias_stagnant = adaptive_hold_bias_stagnant
         self.stagnation_threshold = 0.5
         self.stagnation_window = 20
         self.manual_calibration = manual_calibration
@@ -189,8 +191,8 @@ class MotorEnvironment(gym.Env):
         self.action_space = spaces.MultiDiscrete([3] * num_motors)
 
         self.observation_space = spaces.Box(
-            low=np.array([0.0] + [-1.0]*8 + [-1.0], dtype=np.float32),  # loss, 8 positions, direction
-            high=np.array([100.0] + [1.0]*8 + [1.0], dtype=np.float32),
+            low=np.array([0.0] + [-1.0]*8 + [-1.0], dtype=np.float32),  # normalized loss, 8 positions, direction
+            high=np.array([1.0] + [1.0]*8 + [1.0], dtype=np.float32),
             shape=(10,),
             dtype=np.float32
 )
@@ -426,6 +428,7 @@ class MotorEnvironment(gym.Env):
         self.best_loss = float('inf')
         self.steps_without_improvement = 0
         self.episode_steps = 0
+        self.sub_thresh_loss_count = 0
         self.motor_movement_history.clear()
         
         # Clear history for new episode
@@ -446,6 +449,13 @@ class MotorEnvironment(gym.Env):
             if self.reset_calibration == 0:
                 logger.info("Calibrating motors to center position")
                 calibrate_full_sequence(self.motor_controller, self.manual_calibration)
+                center_offset = -4000  # matches hardcoded value in calibrate_full_sequence
+                for motor_idx in range(self.num_motors):
+                    self.motor_positions[motor_idx] = self.max_cw_steps[motor_idx] + center_offset
+                    logger.info(
+                        f"Motor {motor_idx + 1} position synced after center calibration: "
+                        f"{self.motor_positions[motor_idx]}"
+                    )
             elif self.reset_calibration == 1:
                 logger.info("Calibrating motors to random positions")
                 cal_result = calibrate_full_sequence_with_random(
@@ -522,8 +532,8 @@ class MotorEnvironment(gym.Env):
     def get_recommended_hold_bias(self):
         """Recommend hold bias based on current training state."""
         if self.is_stagnant():
-            return 0.8  # Exploration mode
-        return 1.7  # Normal mode
+            return self.adaptive_hold_bias_stagnant  # Exploration mode
+        return self.adaptive_hold_bias_normal  # Normal mode
     
     def _move_motors_to_home(self):
         """Move all motors to their home positions."""
@@ -672,9 +682,12 @@ class MotorEnvironment(gym.Env):
             # CCW action
             if direction == -1:
                 proposed_pos = current_pos - step_size
-                
-                if proposed_pos <= -self.max_ccw_steps[i]:
-                    logger.warning(f"Motor {motor_num} blocked at CCW limit (pos: {current_pos})")
+                # Software CCW limit sits ccw_safety_margin steps before the
+                # too-slack-to-vibrate limit defined by max_ccw_steps
+                ccw_soft_limit = self.max_ccw_steps[i] - self.ccw_safety_margin
+
+                if proposed_pos <= -ccw_soft_limit:
+                    logger.warning(f"Motor {motor_num} blocked at CCW limit (pos: {current_pos} → {proposed_pos}, limit: {-ccw_soft_limit} incl. {self.ccw_safety_margin} safety margin)")
                     self.limit_violations[i] += 1
                     total_limit_penalty += self.limit_penalty
                 else:
@@ -742,7 +755,8 @@ class MotorEnvironment(gym.Env):
         # STEP 3: Get observation and calculate reward
         # ============================================================
         observation = self._get_observation()
-        current_loss = float(observation[0])
+        # Denormalize: reward and termination thresholds are in raw-loss units
+        current_loss = float(observation[0]) * self.loss_processor.loss_clip_max
         self.loss_history.append(current_loss)
         
         # Calculate reward
@@ -806,19 +820,24 @@ class MotorEnvironment(gym.Env):
         return observation, reward, terminated, truncated, info
 
     def _get_observation(self) -> np.ndarray:
-        loss_obs = self.loss_processor.get_observation().cpu().numpy().flatten()
-        
+        loss_value, direction_value = self.loss_processor.get_loss_and_direction()
+
         # Normalize motor positions to [-1, 1]
         normalized_positions = np.zeros(self.num_motors)
         for i in range(self.num_motors):
             range_total = self.max_cw_steps[i] + self.max_ccw_steps[i]
             normalized_positions[i] = (self.motor_positions[i] + self.max_ccw_steps[i]) / range_total * 2 - 1
-        
-        # Combine: [loss, pos1, pos2, ..., pos8, direction]
+
+        # Normalize loss to [0, 1] against the processor's clip ceiling so it
+        # shares the scale of the position features. The raw loss is recovered
+        # in step() for reward/termination logic, which uses raw-loss units.
+        normalized_loss = loss_value / self.loss_processor.loss_clip_max
+
+        # Combine: [normalized_loss, pos1, pos2, ..., pos8, direction]
         observation = np.concatenate([
-            [loss_obs[0]],           # current loss
+            [normalized_loss],        # current loss, normalized to [0, 1]
             normalized_positions,     # 8 motor positions
-            [loss_obs[1]]            # direction
+            [direction_value]        # direction
         ])
         return observation.astype(np.float32)
 
@@ -865,10 +884,15 @@ class MotorEnvironment(gym.Env):
                     completed_motor = None
 
                     if "STALL DETECTED" in response or "emergency stop" in response.lower():
-                        # Extract motor number
+                        # Extract motor number (firmware reports the ESP32-internal number 1-4)
                         for word in response.split():
                             if word.isdigit():
-                                motor_num = int(word)
+                                internal_motor = int(word)
+                                motor_num = map_internal_to_global_motor(esp_num, internal_motor)
+                                if motor_num is None:
+                                    logger.error(f"Stall message had unmappable motor number {internal_motor} (ESP32 #{esp_num}): {response}")
+                                    break
+                                logger.debug(f"Parsed STALL: internal {internal_motor} -> global {motor_num}")
                                 if motor_num in motors_pending:
                                     motor_idx = motor_num - 1
                                     direction= self.movement_commands[motor_num][0]
@@ -955,6 +979,8 @@ class MotorEnvironment(gym.Env):
                                 movement_completion_time = time.time()
                                 # logger.info("All motors reported completion!")
                                 break
+                        elif completed_motor in stallguard_triggered:
+                            logger.debug(f"Motor {completed_motor} completion after stall - already handled")
                         else:
                             logger.warning(f"Unexpected completion for motor {completed_motor} - not in pending list")
             
@@ -1205,22 +1231,3 @@ class MotorEnvironment(gym.Env):
             self.motor_controller.disconnect()
             logger.info("Motors disabled and disconnected")
     
-    def get_action_distribution_stats(self) -> Dict:
-        """Get statistics about action distribution."""
-        if not self.motor_movement_history:
-            return {}
-        
-        action_counts = np.zeros((self.num_motors, 3))
-        
-        for entry in self.motor_movement_history:
-            for motor_idx, action in enumerate(entry['actions']):
-                action_counts[motor_idx, action] += 1
-        
-        total_steps = len(self.motor_movement_history)
-        action_percentages = action_counts / total_steps * 100
-        
-        return {
-            'action_counts': action_counts,
-            'action_percentages': action_percentages,
-            'total_steps': total_steps
-        }
