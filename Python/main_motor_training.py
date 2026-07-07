@@ -1,6 +1,7 @@
 # Enhanced main_motor_training.py with checkpoint resume functionality
 from __future__ import annotations
 import logging
+from logging.handlers import RotatingFileHandler
 import sys
 import time
 import torch
@@ -113,33 +114,39 @@ def setup_session_logging(config: TrainingConfig, training_state: TrainingState,
     Returns:
         str: Path to the log file for this session
     """
-    # Create logs directory structure
-    experiment_log_dir = os.path.join(config.log_dir, config.experiment_name)
-    os.makedirs(experiment_log_dir, exist_ok=True)
-    
     # Generate timestamp
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    
-    # Generate log filename
-    suffix = "_resumed" if resumed else ""
-    log_filename = f"{timestamp}_ep{training_state.episode}{suffix}.log"
-    session_log_path = os.path.join(experiment_log_dir, log_filename)
-    
+
     # Remove existing handlers to reconfigure
     root_logger = logging.getLogger()
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
-    
+
     # Create new handlers
-    handlers = [
-        logging.StreamHandler(sys.stdout),  # Console output
-        logging.FileHandler(session_log_path, mode='w')  # Session-specific log
-    ]
-    
-    # Optionally add master log handler
-    if config.log_to_master:
-        master_log_path = os.path.join(config.log_dir, "master.log")
-        handlers.append(logging.FileHandler(master_log_path, mode='a'))
+    handlers = [logging.StreamHandler(sys.stdout)]  # Console output
+
+    session_log_path = None
+    if config.log_to_file:
+        # Create logs directory structure
+        experiment_log_dir = os.path.join(config.log_dir, config.experiment_name)
+        os.makedirs(experiment_log_dir, exist_ok=True)
+
+        # Generate log filename
+        suffix = "_resumed" if resumed else ""
+        log_filename = f"{timestamp}_ep{training_state.episode}{suffix}.log"
+        session_log_path = os.path.join(experiment_log_dir, log_filename)
+
+        # Session-specific log, rotated so lifelong sessions cannot grow unbounded
+        handlers.append(RotatingFileHandler(
+            session_log_path, mode='w',
+            maxBytes=config.log_max_bytes, backupCount=config.log_backup_count))
+
+        # Optionally add master log handler (rotated, shared across sessions)
+        if config.log_to_master:
+            master_log_path = os.path.join(config.log_dir, "master.log")
+            handlers.append(RotatingFileHandler(
+                master_log_path, mode='a',
+                maxBytes=config.log_max_bytes, backupCount=config.log_backup_count))
     
     # Configure logging
     logging.basicConfig(
@@ -152,7 +159,10 @@ def setup_session_logging(config: TrainingConfig, training_state: TrainingState,
     # Log session start information
     logger.info("="*80)
     logger.info(f"NEW TRAINING SESSION: {config.experiment_name}")
-    logger.info(f"Log file: {session_log_path}")
+    if session_log_path:
+        logger.info(f"Log file: {session_log_path}")
+    else:
+        logger.info("File logging disabled - console output only")
     logger.info(f"Timestamp: {timestamp}")
     logger.info(f"Starting episode: {training_state.episode}")
     if resumed:
@@ -268,7 +278,33 @@ def save_checkpoint(agent: MotorPPOAgent,
     logger.info(f"Saved metrics to {metrics_path}")
 
 
-def load_checkpoint(checkpoint_path: str, 
+def prune_old_checkpoints(checkpoint_dir: str, keep_last: int):
+    """
+    Delete the oldest periodic checkpoints (and their metrics files) beyond
+    the newest keep_last. best_model.pt, final_model.pt and the archive/
+    subdirectory are never touched. keep_last <= 0 disables pruning.
+    """
+    if keep_last <= 0:
+        return
+    try:
+        checkpoints = [f for f in os.listdir(checkpoint_dir)
+                       if f.startswith('checkpoint_') and f.endswith('.pt')]
+        if len(checkpoints) <= keep_last:
+            return
+        checkpoints.sort(key=lambda f: os.path.getmtime(os.path.join(checkpoint_dir, f)))
+        for old_file in checkpoints[:-keep_last]:
+            old_path = os.path.join(checkpoint_dir, old_file)
+            os.remove(old_path)
+            metrics_path = old_path.replace('.pt', '_metrics.json')
+            if os.path.exists(metrics_path):
+                os.remove(metrics_path)
+        logger.info(f"Pruned {len(checkpoints) - keep_last} old checkpoints "
+                    f"(keeping newest {keep_last})")
+    except Exception as e:
+        logger.error(f"Checkpoint pruning failed: {e}")
+
+
+def load_checkpoint(checkpoint_path: str,
                    agent: Optional[MotorPPOAgent] = None,
                    device: str = 'cpu') -> tuple:
     """
@@ -311,8 +347,7 @@ def load_checkpoint(checkpoint_path: str,
             temperature_decay=config.temperature_decay,
             min_temperature=config.min_temperature,
             value_coef=config.value_coef,               
-            normalize_advantages=config.normalize_advantages, 
-            normalize_returns=config.normalize_returns,       
+            normalize_advantages=config.normalize_advantages,
             use_gae=config.use_gae,
             actor_hidden_layers=config.actor_hidden_layers,      
             critic_hidden_layers=config.critic_hidden_layers,   
@@ -459,14 +494,17 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     session_log_path = setup_session_logging(config, training_state, resumed=resumed)
     logger.info(f"Session log: {session_log_path}")
 
-    hyperparams_file = save_session_hyperparameters(
-        config=config,
-        training_state=training_state,
-        hyperparams_dir=os.path.join(config.results_dir, "hyperparameters"),
-        resumed=resumed,
-        resumed_from=resume_from if resumed else None
-    )
-    logger.info(f"✓ Hyperparameters saved to: {hyperparams_file}")
+    if config.log_to_file:
+        hyperparams_file = save_session_hyperparameters(
+            config=config,
+            training_state=training_state,
+            hyperparams_dir=os.path.join(config.results_dir, "hyperparameters"),
+            resumed=resumed,
+            resumed_from=resume_from if resumed else None
+        )
+        logger.info(f"✓ Hyperparameters saved to: {hyperparams_file}")
+    else:
+        logger.info("File logging disabled - skipping hyperparameters snapshot")
     
     try:
         # 1. Setup audio system
@@ -534,7 +572,8 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             max_ccw_steps=config.max_ccw_steps,
             max_cw_steps=config.max_cw_steps,
             limit_penalty=config.limit_penalty,
-            adaptive_hold_bias=config.hold_bias,
+            adaptive_hold_bias_normal=config.adaptive_hold_bias_normal,
+            adaptive_hold_bias_stagnant=config.adaptive_hold_bias_stagnant,
             manual_calibration=config.manual_calibration,
             reset_calibration = config.reset_calibration,
             target_loss=config.target_loss,
@@ -622,8 +661,7 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
                 temperature_decay=config.temperature_decay,
                 min_temperature=config.min_temperature,
                 value_coef=config.value_coef,               
-                normalize_advantages=config.normalize_advantages, 
-                normalize_returns=config.normalize_returns,       
+                normalize_advantages=config.normalize_advantages,
                 use_gae=config.use_gae,
                 actor_hidden_layers=config.actor_hidden_layers,      
                 critic_hidden_layers=config.critic_hidden_layers,   
@@ -774,7 +812,7 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
                     max_steps=config.max_step_size
                 )
 
-                if 'recommended_hold_bias' in info:
+                if config.use_adaptive_hold_bias and 'recommended_hold_bias' in info:
                     agent.actor.hold_bias = info['recommended_hold_bias']
                 
                 # Store transition with directions and magnitudes separately
@@ -868,7 +906,7 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
                 env.render()
             
             # Save checkpoint
-            if training_state.episode % config.save_interval == 0:
+            if config.save_checkpoints and training_state.episode % config.save_interval == 0:
                 checkpoint_name = f"checkpoint_ep{training_state.episode}_ts{training_state.timesteps}_r{avg_reward:.2f}.pt"
                 checkpoint_path = os.path.join(config.checkpoint_dir, checkpoint_name)
                 
@@ -884,9 +922,11 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
                     best_path = os.path.join(config.checkpoint_dir, "best_model.pt")
                     save_checkpoint(agent, training_state, config, best_path, is_best=True)
                     logger.info(f"New best model! Avg reward: {training_state.best_reward:.2f}")
+
+                prune_old_checkpoints(config.checkpoint_dir, config.keep_last_checkpoints)
             
             # Plot progress
-            if training_state.episode % config.plot_save_frequency == 0:
+            if config.save_plots and training_state.episode % config.plot_save_frequency == 0:
                 plot_training_progress(
                     training_state.episode_rewards,
                     training_state.episode_losses,
@@ -900,8 +940,9 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         logger.info("Training complete!")
         
         # Save final checkpoint
-        final_path = os.path.join(config.checkpoint_dir, "final_model.pt")
-        save_checkpoint(agent, training_state, config, final_path)
+        if config.save_checkpoints:
+            final_path = os.path.join(config.checkpoint_dir, "final_model.pt")
+            save_checkpoint(agent, training_state, config, final_path)
         
         # Final statistics
         logger.info(f"Final statistics:")
@@ -1057,6 +1098,8 @@ def main():
     
     # Other arguments
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
+    parser.add_argument('--no-save', action='store_true',
+                        help='Disable all file output (checkpoints, logs, plots) for quick test runs')
     parser.add_argument('--save-config', type=str, help='Save current config to file and exit')
 
     # Motor calibration
@@ -1121,6 +1164,11 @@ def main():
         config.available_step_sizes = args.step_sizes   
     if args.disable_variable_steps:
         config.use_variable_step_sizes = False
+    if args.no_save:
+        config.save_checkpoints = False
+        config.log_to_file = False
+        config.save_plots = False
+        print("--no-save: file output disabled (checkpoints, logs, plots)")
 
     # Save config if requested
     if args.save_config:

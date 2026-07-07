@@ -29,13 +29,16 @@ class TrainingConfig:
     use_motors: bool = True
     manual_calibration: bool = False # Set to True if you wish to calibrate the motors prior to training. See the README file on motor positioning
     motor_speed: int = 200 
-    use_variable_step_sizes = False
-    available_step_sizes = [25, 50, 75, 100]
+    use_variable_step_sizes: bool = False
+    available_step_sizes: List[int] = field(default_factory=lambda: [25, 50, 75, 100])
     step_size_logits_bias: Optional[List[float]] = None
     step_wait_time: float = 0.5 # The time in seconds between the termination of all motors and the next step. 
     reset_wait_time: float = 2 # The time in seconds to allow the strings to settle after an episode reset (which includes motor recalibration)
     reset_calibration: int = 1  # 0: center, 1: random, 2: skip
     hold_bias: float = 3.0 # The higher the value, the more prone the network is to turn fewer motors
+    use_adaptive_hold_bias: bool = False # If True, hold_bias is overridden each step by the environment's recommendation (normal/stagnant values below). If False, hold_bias applies throughout training.
+    adaptive_hold_bias_normal: float = 1.7 # Adaptive mode only: hold bias under normal conditions
+    adaptive_hold_bias_stagnant: float = 0.8 # Adaptive mode only: lower bias when training stagnates, encouraging more motor movement
     
     # Motor position limits (per motor)
     # Maximum steps in each direction from the center. cw should correspond to when the tuner hits its mechanical limit, while ccw is set as the limit 
@@ -164,7 +167,6 @@ class TrainingConfig:
     # ========================================
     value_coef: float = 0.5                      # Value function loss coefficient
     normalize_advantages: bool = True            # Normalize advantages during training
-    normalize_returns: bool = False              # Normalize returns (experimental)
     use_gae: bool = True                         # Use Generalized Advantage Estimation
     ppo_update_frequency: int = 1                # Episodes between PPO updates
     
@@ -213,7 +215,7 @@ class TrainingConfig:
     stft_window_type: str = "hann"               # Window function: hann, hamming, blackman
     stft_hop_divisor: int = 4                    # Hop length = window_size / hop_divisor
     use_pyfftw: bool = True                      # Use pyFFTW for faster FFT
-    fft_threads: int = 4                         # Number of FFT threads
+    fft_threads: int = 1                         # FFT threads. Keep at 1: benchmarked 2026-07, threading overhead dominates at sizes <= 4096 (1 thread is 2-6x faster)
     
     # ========================================
     # Network Architecture Details (NEW)
@@ -313,6 +315,12 @@ class TrainingConfig:
     results_dir: str = "./results"
     log_dir: str = "./logs"                      # Base directory for logs
     log_to_master: bool = False                   # Also log to master.log
+    log_to_file: bool = True                     # Write log files (False = console only, for quick test runs)
+    log_max_bytes: int = 10485760                # Rotate log files beyond this size (10 MB per chunk)
+    log_backup_count: int = 5                    # Rotated chunks kept per log file (total cap = (backup_count+1) * max_bytes)
+    save_checkpoints: bool = True                # Write checkpoint/metrics files (False for quick test runs)
+    keep_last_checkpoints: int = 25              # Prune periodic checkpoints beyond the newest N (0 = keep all; best_model/final_model never pruned)
+    save_plots: bool = True                      # Write training progress plots
     log_filename_format: str = "{timestamp}_{experiment}_ep{episode}.log"  # Format for log files
 
     # ========================================
