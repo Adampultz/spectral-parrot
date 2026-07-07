@@ -167,8 +167,9 @@ class StereoSTFTProcessor:
             if n_samples == 0:
                 return
             
-            channel_1_data = channel_1_data[:n_samples].astype(np.float32)
-            channel_2_data = channel_2_data[:n_samples].astype(np.float32)
+            # asarray is a no-op view when dtype already matches (astype always copies)
+            channel_1_data = np.asarray(channel_1_data[:n_samples], dtype=np.float32)
+            channel_2_data = np.asarray(channel_2_data[:n_samples], dtype=np.float32)
             
             # Calculate hop boundaries
             initial_hop_index = self.total_samples_processed // self.hop_length
@@ -197,8 +198,11 @@ class StereoSTFTProcessor:
             final_hop_index = self.total_samples_processed // self.hop_length
             hops_completed = final_hop_index - initial_hop_index
             
-            # Compute FFT for each completed hop (both channels together)
-            for hop_num in range(hops_completed):
+            # Compute FFT once if at least one hop boundary was crossed.
+            # The buffer contents don't change between hop boundaries within a
+            # single chunk, so per-hop FFTs would be identical duplicates -
+            # computing once per chunk yields bit-identical downstream results.
+            if hops_completed > 0:
                 start_time = time.perf_counter()
                 self._compute_synchronized_fft()
                 fft_time = time.perf_counter() - start_time
@@ -345,8 +349,8 @@ class MultiScaleSpectralLoss:
         # Storage for spectral data - now stores both channels together
         self.spectral_data = {}  # Key: scale, Value: {'ch1': array, 'ch2': array}
         
-        # Loss history
-        self.loss_history = []
+        # Loss history - bounded: at ~46 Hz an unbounded list grows GBs/day in continuous operation
+        self.loss_history = deque(maxlen=1000)
         self.current_losses = {}
         
         # Callbacks for loss results
@@ -535,12 +539,12 @@ class MultiScaleSpectralLoss:
     def get_loss_history(self, n_recent=10):
         """Get recent loss history."""
         with self.lock:
-            return self.loss_history[-n_recent:] if self.loss_history else []
+            return list(self.loss_history)[-n_recent:] if self.loss_history else []
             
     def get_average_losses(self, n_recent=10):
         """Get average losses over recent computations."""
         with self.lock:
-            recent_history = self.loss_history[-n_recent:] if self.loss_history else []
+            recent_history = list(self.loss_history)[-n_recent:] if self.loss_history else []
                 
         if not recent_history:
             return None
@@ -627,7 +631,8 @@ class EnhancedAudio(SimpleAudio):
                 if max_val > 0:
                     audio_data = audio_data.astype(np.float32) / max_val
         else:
-            audio_data = audio_data.astype(np.float32)
+            # No-op when already float32; only copies if conversion is needed
+            audio_data = np.asarray(audio_data, dtype=np.float32)
             max_val = np.max(np.abs(audio_data))
             if max_val > 10.0:
                 logger.warning(f"Audio values up to {max_val:.1f} - possible format mismatch")

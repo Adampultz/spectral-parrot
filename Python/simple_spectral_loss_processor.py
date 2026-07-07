@@ -62,6 +62,9 @@ class SimpleLossProcessor:
         # Track current loss and history
         self.current_loss = 0.0
         self.current_direction = 0
+        # Smoothed loss is recomputed lazily on read (readers poll ~once per
+        # env step, while loss data arrives ~46x/s in the audio thread)
+        self._loss_dirty = False
         
         # Circular buffer with timestamps for adaptive window
         self.loss_history = deque(maxlen=loss_history_buffer_size)
@@ -199,8 +202,9 @@ class SimpleLossProcessor:
             rate_str = f"{self.loss_rate_hz:.1f}" if self.loss_rate_hz is not None else "~46"
             logger.info(f"SimpleLossProcessor ready - receiving loss values at ~{rate_str} Hz")
         
-        # Update current values with robust averaging
-        self._update_current_loss()
+        # Defer the robust averaging to the next read (get_loss_and_direction /
+        # get_observation) - computing it per arrival wastes audio-thread time
+        self._loss_dirty = True
     
     def _update_current_loss(self):
         """
@@ -255,25 +259,39 @@ class SimpleLossProcessor:
         if self.current_loss < self.best_loss:
             self.best_loss = self.current_loss
 
+    def _ensure_current_loss(self):
+        """Recompute the smoothed loss if new data arrived since the last read."""
+        if self._loss_dirty:
+            self._update_current_loss()
+            self._loss_dirty = False
+
+    def get_loss_and_direction(self):
+        """
+        Get the current smoothed loss and direction as plain floats.
+        Cheaper than get_observation() - no tensor allocation.
+
+        Returns:
+            (loss, direction) tuple of floats
+        """
+        self._ensure_current_loss()
+        if not self.ready:
+            return 10.0, 0.0
+        return float(self.current_loss), float(self.current_direction)
+
     def get_observation(self):
         """
         Get the current loss value as an observation for the RL agent.
         Returns a tensor for compatibility with motor_environment.
-        
+
         Returns:
             torch.Tensor: Observation tensor [1, 2] with [loss, direction]
         """
-        if not self.ready:
-            loss_value = 10.0
-            direction_value = 0.0
-        else:
-            loss_value = self.current_loss
-            direction_value = float(self.current_direction)
-        
+        loss_value, direction_value = self.get_loss_and_direction()
+
         # Return as tensor with batch dimension [1, 2] for compatibility
-        observation = torch.tensor([[loss_value, direction_value]], 
+        observation = torch.tensor([[loss_value, direction_value]],
                                    device=self.device, dtype=torch.float32)
-        
+
         return observation
 
     def get_reward(self, baseline_loss=None):
@@ -288,7 +306,8 @@ class SimpleLossProcessor:
         """
         if not self.ready:
             return 0.0
-        
+
+        self._ensure_current_loss()
         # Simple negative loss as reward
         reward = -self.current_loss
         
@@ -316,8 +335,9 @@ class SimpleLossProcessor:
                 'averaging_entries': 0
             }
         
+        self._ensure_current_loss()
         recent_losses = [entry['loss'] for entry in self.loss_history]
-        
+
         return {
             'current_loss': self.current_loss,
             'mean_loss': float(np.mean(recent_losses)),
@@ -338,6 +358,7 @@ class SimpleLossProcessor:
         self.loss_history.clear()
         self.current_loss = 0.0
         self.current_direction = 0
+        self._loss_dirty = False
         self.previous_loss = None
         self.best_loss = float('inf')
         self.ready = False
@@ -413,6 +434,7 @@ class SimpleLossProcessor:
     
     def get_direction(self):
         """Get the current direction indicator."""
+        self._ensure_current_loss()
         return self.current_direction
     
     def get_current_loss_value(self):
