@@ -351,7 +351,7 @@ s.waitForBoot({
 
 		// Get amplitude of each string
 		amp = RMS.ar(oscArray, 20).ampdb.linlin(-65.0, 0.0, 0, 1.0);
-		amp = Integrator.ar(amp, In.kr(~integration_factor)).clip(0.0, 1.0);
+		amp = Integrator.ar(amp, In.kr(~integration_factor));
 
 		mean_amps = amp.mean;
 
