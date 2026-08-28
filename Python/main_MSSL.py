@@ -3,6 +3,8 @@ import pyaudio
 import wave
 import numpy as np
 import time
+import threading
+import queue
 from typing import Callable, List, Optional
 
 
@@ -109,7 +111,16 @@ class SimpleAudio:
         
         self.frames = []  # Recorded frames
         self._callbacks = []  # User callbacks
-        
+
+        # Audio processing is decoupled from the real-time PyAudio callback:
+        # the callback only enqueues raw buffers, and a separate worker thread
+        # runs _process_callbacks (STFT/loss/etc.) so heavy computation can
+        # never make the real-time thread miss its deadline and underrun.
+        self._audio_queue = queue.Queue(maxsize=50)
+        self._processing_thread = None
+        self._stop_processing = threading.Event()
+        self.dropped_buffers = 0
+
     def list_devices(self):
         """List all available audio devices"""
         return SimpleAudio.list_available_devices()
@@ -131,7 +142,16 @@ class SimpleAudio:
     
         for callback in self._callbacks:
             callback(audio_data)
-            
+
+    def _processing_loop(self):
+        """Worker thread: pulls buffers off the queue and runs callbacks off the real-time audio thread."""
+        while not self._stop_processing.is_set():
+            try:
+                audio_data = self._audio_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            self._process_callbacks(audio_data)
+
     def select_devices(self):
         """Interactively select input and output devices"""
         self.list_devices()
@@ -185,44 +205,14 @@ class SimpleAudio:
         if self.is_running:
             print("Audio system already running.")
             return
-                
+
         self.is_running = True
 
-        # Define callback function first
-        def input_callback(in_data, frame_count, time_info, status):
-            # Convert audio data to numpy array
-            audio_data = np.frombuffer(in_data, dtype=np.int16)
-            
-            # Process through user callbacks
-            self._process_callbacks(audio_data)
-            
-            # Record if enabled
-            if self.is_recording:
-                self.frames.append(in_data)
-                
-            # Monitor if enabled
-            if self.is_monitoring and self.output_stream:
-                self.output_stream.write(in_data)
-                
-            return (in_data, pyaudio.paContinue)
-    
-        # Open input stream
-        self.input_stream = self.p.open(
-            format=pyaudio.paInt16,
-            channels=self.channels,
-            rate=self.sample_rate,
-            input=True,
-            input_device_index=self.input_device,
-            frames_per_buffer=self.buffer_size,
-            stream_callback=input_callback
-        )
-        """Start the audio system"""
-        if self.is_running:
-            print("Audio system already running.")
-            return
-            
-        self.is_running = True
-        
+        # Start the worker thread that runs callbacks off the real-time audio thread
+        self._stop_processing.clear()
+        self._processing_thread = threading.Thread(target=self._processing_loop, daemon=True)
+        self._processing_thread.start()
+
         # Set up output stream if monitoring
         if self.is_monitoring:
             self.output_stream = self.p.open(
@@ -233,25 +223,27 @@ class SimpleAudio:
                 output_device_index=self.output_device,
                 frames_per_buffer=self.buffer_size
             )
-        
-        # Callback function for audio input
+
+        # Callback function for audio input - must return quickly (real-time thread),
+        # so it only enqueues the buffer; _process_callbacks runs on _processing_thread.
         def input_callback(in_data, frame_count, time_info, status):
-            # Convert audio data to numpy array
             audio_data = np.frombuffer(in_data, dtype=np.int16)
-            
-            # Process through user callbacks
-            self._process_callbacks(audio_data)
-            
+
+            try:
+                self._audio_queue.put_nowait(audio_data)
+            except queue.Full:
+                self.dropped_buffers += 1
+
             # Record if enabled
             if self.is_recording:
                 self.frames.append(in_data)
-                
+
             # Monitor if enabled
             if self.is_monitoring and self.output_stream:
                 self.output_stream.write(in_data)
-                
+
             return (in_data, pyaudio.paContinue)
-        
+
         # Open input stream
         self.input_stream = self.p.open(
             format=pyaudio.paInt16,
@@ -262,7 +254,7 @@ class SimpleAudio:
             frames_per_buffer=self.buffer_size,
             stream_callback=input_callback
         )
-        
+
         # Print info about the active devices
         try:
             if self.input_device is None:
@@ -270,7 +262,7 @@ class SimpleAudio:
             else:
                 input_info = self.p.get_device_info_by_index(self.input_device)
             print(f"Using input device: {input_info['name']}")
-            
+
             if self.is_monitoring:
                 if self.output_device is None:
                     output_info = self.p.get_default_output_device_info()
@@ -279,7 +271,7 @@ class SimpleAudio:
                 print(f"Using output device: {output_info['name']}")
         except:
             pass
-            
+
         print("Audio system started")
     
     def stop(self):
@@ -290,17 +282,22 @@ class SimpleAudio:
             
         self.is_running = False
         self.is_recording = False
-        
+
         if self.input_stream:
             self.input_stream.stop_stream()
             self.input_stream.close()
             self.input_stream = None
-            
+
         if self.output_stream:
             self.output_stream.stop_stream()
             self.output_stream.close()
             self.output_stream = None
-            
+
+        self._stop_processing.set()
+        if self._processing_thread:
+            self._processing_thread.join(timeout=2.0)
+            self._processing_thread = None
+
         print("Audio system stopped")
     
     def start_recording(self):
