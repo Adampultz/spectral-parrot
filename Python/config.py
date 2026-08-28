@@ -104,6 +104,7 @@ class TrainingConfig:
     min_signal_threshold: float = 0.05               # Minimum signal level (below = penalty)
     weak_signal_penalty: float = 0.0                 # Penalty when signal too weak
     normalization_method: str = "l2"                  # "l2" (Frobenius) or "cosine"
+    compute_comparison_loss: bool = False             # Also compute + log the non-active loss method for side-by-side comparison (diagnostic only, never drives training)
 
     # ========================================
     # Reward Configuration
@@ -123,7 +124,29 @@ class TrainingConfig:
     # ========================================
     stagnation_threshold: float = 0.5            # Loss std dev threshold for stagnation
     stagnation_window: int = 20                  # Window size for detecting stagnation
-    
+    stagnation_loss_gate: bool = True            # Only let adaptive temperature/LR escalate when smoothed loss is also in the worst stagnation_gate_percentile% of recent history (self-relative, independent of target_loss - see below)
+    stagnation_gate_window: int = 300            # Rolling window (steps) the gate's adaptive threshold is computed over
+    stagnation_gate_percentile: float = 90       # Percentile of that window used as the "this is unusually bad" threshold
+
+    # ========================================
+    # Adaptive (loss-tied) exploration temperature and learning rate
+    # Replaces the fixed decay/one-shot schedules above when enabled - ties both
+    # to loss-plateau detection instead, appropriate for a lifelong-learning
+    # instrument that must keep adapting rather than converge once and stop.
+    # ========================================
+    use_adaptive_temperature: bool = True         # Tie exploration temperature to stagnation instead of fixed per-update decay
+    temperature_stagnation_window: int = 20       # Window size for temperature's own stagnation check (independent of stagnation_window above)
+    temperature_stagnation_threshold: float = 0.5 # Loss std dev threshold for temperature stagnation
+    temperature_boost_factor: float = 1.05        # Multiplicative boost applied per step while stagnant
+    temperature_max: float = 2.0                  # Ceiling on boosted temperature
+
+    use_adaptive_learning_rate: bool = True        # Tie learning rate to loss-plateau detection instead of the fixed lr_warmup_episodes step-down
+    lr_patience: int = 30                          # Steps without improvement (by lr_min_delta) before reducing LR
+    lr_min_delta: float = 0.05                     # Minimum loss improvement to reset the LR patience counter
+    lr_reduce_factor: float = 0.5                  # Multiplicative LR reduction when plateaued
+    lr_min_actor: float = 1e-5                     # Floor for actor LR
+    lr_min_critic: float = 1e-5                    # Floor for critic LR
+
     # ========================================
     # Loss Averaging (NEW)
     # ========================================
@@ -451,7 +474,10 @@ class TrainingConfig:
         
         print("\n[PPO Exploration]")
         print(f"  Temperature: {self.initial_temperature} → {self.min_temperature}")
-        print(f"  Decay rate: {self.temperature_decay}")
+        if self.use_adaptive_temperature:
+            print(f"  Decay rate: {self.temperature_decay} (baseline only - overridden by adaptive temperature, see below)")
+        else:
+            print(f"  Decay rate: {self.temperature_decay}")
         print(f"  Gradient clipping: {self.max_grad_norm}")
         
         print("\n[Timeouts]")
@@ -465,9 +491,25 @@ class TrainingConfig:
         print(f"  Spectral data max age: {self.spectral_data_max_age}s")
         
         print("\n[Learning Rate Schedule]")
-        print(f"  Warmup episodes: {self.lr_warmup_episodes}")
-        print(f"  After warmup: actor={self.lr_reduced_actor}, critic={self.lr_reduced_critic}")
-        
+        if self.use_adaptive_learning_rate:
+            print(f"  Warmup episodes: {self.lr_warmup_episodes} (unused - overridden by adaptive learning rate, see below)")
+            print(f"  After warmup: actor={self.lr_reduced_actor}, critic={self.lr_reduced_critic} (unused)")
+        else:
+            print(f"  Warmup episodes: {self.lr_warmup_episodes}")
+            print(f"  After warmup: actor={self.lr_reduced_actor}, critic={self.lr_reduced_critic}")
+
+        print("\n[Adaptive Temperature / Learning Rate (loss-tied)]")
+        print(f"  Adaptive temperature: {self.use_adaptive_temperature}")
+        if self.use_adaptive_temperature:
+            print(f"  Window/threshold: {self.temperature_stagnation_window} steps / {self.temperature_stagnation_threshold}")
+            print(f"  Boost factor: {self.temperature_boost_factor}, max: {self.temperature_max}")
+        print(f"  Adaptive learning rate: {self.use_adaptive_learning_rate}")
+        if self.use_adaptive_learning_rate:
+            print(f"  Patience: {self.lr_patience} steps, min delta: {self.lr_min_delta}")
+            print(f"  Reduce factor: {self.lr_reduce_factor}, floors: actor={self.lr_min_actor}, critic={self.lr_min_critic}")
+        print(f"  Loss-level gate: {self.stagnation_loss_gate} "
+              f"(adaptive - worst {100 - self.stagnation_gate_percentile:.0f}% of last {self.stagnation_gate_window} steps, independent of target_loss)")
+
         print("\n[Loss Processing]")
         print(f"  Averaging window factor: {self.averaging_window_factor}")
         print(f"  History buffer size: {self.loss_history_buffer_size}")

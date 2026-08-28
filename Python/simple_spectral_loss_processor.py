@@ -62,6 +62,9 @@ class SimpleLossProcessor:
         # Track current loss and history
         self.current_loss = 0.0
         self.current_direction = 0
+        # Latest raw value from the non-active loss method, for side-by-side
+        # comparison only - never smoothed/averaged, never drives training.
+        self.current_comparison_loss = 0.0
         # Smoothed loss is recomputed lazily on read (readers poll ~once per
         # env step, while loss data arrives ~46x/s in the audio thread)
         self._loss_dirty = False
@@ -177,9 +180,12 @@ class SimpleLossProcessor:
         # Extract loss value
         total_loss = loss_result.get('total_loss', 0.0)
         direction = loss_result.get('direction', 0)
-        
+
         # Clip extreme values
         total_loss = np.clip(total_loss, 0.0, self.loss_clip_max)
+
+        # Diagnostic only, from the non-active loss method - not clipped/smoothed
+        self.current_comparison_loss = loss_result.get('comparison_loss', 0.0)
         
         # Store in history with timestamp
         self.loss_history.append({
@@ -278,6 +284,14 @@ class SimpleLossProcessor:
             return 10.0, 0.0
         return float(self.current_loss), float(self.current_direction)
 
+    def get_comparison_loss(self):
+        """
+        Latest raw total loss from the non-active loss method (see
+        MultiScaleSpectralLoss.use_normalized_loss), for side-by-side
+        comparison only. Not smoothed/averaged and never drives training.
+        """
+        return float(self.current_comparison_loss)
+
     def get_observation(self):
         """
         Get the current loss value as an observation for the RL agent.
@@ -358,6 +372,7 @@ class SimpleLossProcessor:
         self.loss_history.clear()
         self.current_loss = 0.0
         self.current_direction = 0
+        self.current_comparison_loss = 0.0
         self._loss_dirty = False
         self.previous_loss = None
         self.best_loss = float('inf')

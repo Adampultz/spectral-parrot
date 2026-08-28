@@ -107,6 +107,23 @@ class MotorEnvironment(gym.Env):
                 ccw_safety_margin=200,
                 stagnation_threshold=0.5,
                 stagnation_window=20,
+                stagnation_loss_gate=True,
+                stagnation_gate_window=300,
+                stagnation_gate_percentile=90,
+                initial_temperature=2.0,
+                temperature_decay=0.998,
+                min_temperature=0.3,
+                temperature_stagnation_window=20,
+                temperature_stagnation_threshold=0.5,
+                temperature_boost_factor=1.05,
+                temperature_max=2.0,
+                lr_actor=1e-4,
+                lr_critic=3e-4,
+                lr_patience=30,
+                lr_min_delta=0.05,
+                lr_reduce_factor=0.5,
+                lr_min_actor=1e-5,
+                lr_min_critic=1e-5,
                 motor_completion_timeout=30.0,
                 stabilization_time=2.0,
                 use_improvement_bonus=True,
@@ -215,7 +232,7 @@ class MotorEnvironment(gym.Env):
         
         # History tracking for sophisticated reward calculation
         self.improvement_history = deque(maxlen=5)
-        self.loss_history = deque(maxlen=20)
+        self.loss_history = deque(maxlen=max(stagnation_window, temperature_stagnation_window, stagnation_gate_window))
 
         self.max_ccw_steps = max_ccw_steps
         self.max_cw_steps = max_cw_steps
@@ -231,9 +248,35 @@ class MotorEnvironment(gym.Env):
         self.penalty_decay_episodes = penalty_decay_episodes
         self.stagnation_threshold = stagnation_threshold
         self.stagnation_window = stagnation_window
+        self.stagnation_loss_gate = stagnation_loss_gate
+        self.stagnation_gate_window = stagnation_gate_window
+        self.stagnation_gate_percentile = stagnation_gate_percentile
         self.motor_completion_timeout = motor_completion_timeout
         self.stabilization_time = stabilization_time
         self.ccw_safety_margin = ccw_safety_margin
+
+        # Adaptive (loss-tied) exploration temperature and learning rate.
+        # This is a lifelong-learning instrument, not a converge-and-stop one:
+        # current_temperature/current_lr_* and their patience counters below are
+        # deliberately NOT reset in reset() - they persist for the whole process,
+        # unlike best_loss/steps_without_improvement which are per-episode.
+        self.temperature_decay = temperature_decay
+        self.min_temperature = min_temperature
+        self.temperature_stagnation_window = temperature_stagnation_window
+        self.temperature_stagnation_threshold = temperature_stagnation_threshold
+        self.temperature_boost_factor = temperature_boost_factor
+        self.temperature_max = temperature_max
+        self.current_temperature = initial_temperature
+
+        self.lr_patience = lr_patience
+        self.lr_min_delta = lr_min_delta
+        self.lr_reduce_factor = lr_reduce_factor
+        self.lr_min_actor = lr_min_actor
+        self.lr_min_critic = lr_min_critic
+        self.current_lr_actor = lr_actor
+        self.current_lr_critic = lr_critic
+        self.lr_best_loss = float('inf')
+        self.lr_steps_without_improvement = 0
 
         # Store reward function config
         self.use_improvement_bonus = use_improvement_bonus
@@ -521,19 +564,71 @@ class MotorEnvironment(gym.Env):
         
         return observation, info
     
+    def _stagnant(self, window, threshold):
+        """Generic variance-window stagnation check: has smoothed loss gone flat?"""
+        if len(self.loss_history) >= window:
+            recent_losses = list(self.loss_history)[-window:]
+            return np.std(recent_losses) < threshold
+        return False
+
     def is_stagnant(self):
         """Check if training is stagnant based on recent loss history."""
-        if len(self.loss_history) >= self.stagnation_window:
-            recent_losses = list(self.loss_history)[-self.stagnation_window:]
-            loss_std = np.std(recent_losses)
-            return loss_std < self.stagnation_threshold
-        return False
-    
+        return self._stagnant(self.stagnation_window, self.stagnation_threshold)
+
+    def is_temperature_stagnant(self):
+        """Independent stagnation check (own window/threshold) driving exploration temperature."""
+        return self._stagnant(self.temperature_stagnation_window, self.temperature_stagnation_threshold)
+
+    def _gate_open(self):
+        """
+        Adaptive loss-level gate: is the current smoothed loss worse than
+        stagnation_gate_percentile% of the last stagnation_gate_window steps?
+        Self-relative and independent of target_loss on purpose - target_loss is
+        the reward function's break-even point (motor_environment.py ~line 1187),
+        not a "this is unusually bad" classifier, and it doesn't adapt as the
+        instrument's baseline shifts over a lifelong run. Closed (False) until a
+        full window of history is available, to avoid a noisy early estimate.
+        """
+        if self.previous_loss is None or len(self.loss_history) < self.stagnation_gate_window:
+            return False
+        recent = list(self.loss_history)[-self.stagnation_gate_window:]
+        threshold = np.percentile(recent, self.stagnation_gate_percentile)
+        return self.previous_loss > threshold
+
     def get_recommended_hold_bias(self):
         """Recommend hold bias based on current training state."""
         if self.is_stagnant():
             return self.adaptive_hold_bias_stagnant  # Exploration mode
         return self.adaptive_hold_bias_normal  # Normal mode
+
+    def get_recommended_temperature(self):
+        """
+        Adaptive exploration temperature: boosts (up to temperature_max) while
+        stagnant at a loss worse than target; otherwise relaxes back down via the
+        existing decay/floor. Persists across episodes - see reset() note above.
+        """
+        if self.is_temperature_stagnant() and (not self.stagnation_loss_gate or self._gate_open()):
+            self.current_temperature = min(
+                self.current_temperature * self.temperature_boost_factor, self.temperature_max)
+        else:
+            self.current_temperature = max(
+                self.current_temperature * self.temperature_decay, self.min_temperature)
+        return self.current_temperature
+
+    def get_recommended_learning_rates(self):
+        """
+        ReduceLROnPlateau-style: reduce LR by lr_reduce_factor (down to a floor)
+        once lr_steps_without_improvement reaches lr_patience while the loss is
+        worse than target. One-directional by design - recovering after a later
+        shock/regime-change is a separate mechanism, not yet built. Persists across
+        episodes - see reset() note above.
+        """
+        if (self.lr_steps_without_improvement >= self.lr_patience
+                and (not self.stagnation_loss_gate or self._gate_open())):
+            self.current_lr_actor = max(self.current_lr_actor * self.lr_reduce_factor, self.lr_min_actor)
+            self.current_lr_critic = max(self.current_lr_critic * self.lr_reduce_factor, self.lr_min_critic)
+            self.lr_steps_without_improvement = 0
+        return self.current_lr_actor, self.current_lr_critic
     
     def _move_motors_to_home(self):
         """Move all motors to their home positions."""
@@ -802,10 +897,21 @@ class MotorEnvironment(gym.Env):
             self.steps_without_improvement = 0
         else:
             self.steps_without_improvement += 1
-        
+
+        # LR-plateau patience - separate from the above (own min_delta/threshold),
+        # and deliberately NOT reset per episode (see reset() note).
+        if current_loss < self.lr_best_loss - self.lr_min_delta:
+            self.lr_best_loss = current_loss
+            self.lr_steps_without_improvement = 0
+        else:
+            self.lr_steps_without_improvement += 1
+
+        recommended_lr_actor, recommended_lr_critic = self.get_recommended_learning_rates()
+
         # Info dict
         info = {
             'spectral_loss': current_loss,
+            'comparison_loss': self.loss_processor.get_comparison_loss(),
             'best_loss': self.best_loss,
             'steps_without_improvement': self.steps_without_improvement,
             'motors_moved': list(motors_moving),
@@ -814,7 +920,10 @@ class MotorEnvironment(gym.Env):
             'limit_violations': self.limit_violations.copy(),
             'episode_steps': self.episode_steps,
             'is_stagnant': self.is_stagnant(),
-            'recommended_hold_bias': self.get_recommended_hold_bias()
+            'recommended_hold_bias': self.get_recommended_hold_bias(),
+            'recommended_temperature': self.get_recommended_temperature(),
+            'recommended_lr_actor': recommended_lr_actor,
+            'recommended_lr_critic': recommended_lr_critic
         }
         
         return observation, reward, terminated, truncated, info

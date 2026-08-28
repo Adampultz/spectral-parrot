@@ -294,8 +294,9 @@ class MultiScaleSpectralLoss:
                  fft_threads=2,
                  use_normalized_loss=True,             
                  min_signal_threshold=0.1,              
-                 weak_signal_penalty=50.0,              
-                 normalization_method="l2"):
+                 weak_signal_penalty=50.0,
+                 normalization_method="l2",
+                 compute_comparison_loss=False):
         """
         Initialize multi-scale spectral loss calculator with synchronized processing.
         """
@@ -306,13 +307,15 @@ class MultiScaleSpectralLoss:
         self.min_signal_threshold = min_signal_threshold
         self.weak_signal_penalty = weak_signal_penalty
         self.normalization_method = normalization_method
+        self.compute_comparison_loss = compute_comparison_loss
         self.suppress_warnings = False # For avoiding weak signal messages during initialization and shutdown
 
+        comparison_note = " - other method computed alongside for comparison" if compute_comparison_loss else ""
         if use_normalized_loss:
-            logger.info(f"Using normalized loss (method: {normalization_method})")
+            logger.info(f"Using normalized loss (method: {normalization_method}){comparison_note}")
             logger.info(f"Min signal threshold: {min_signal_threshold}, weak signal penalty: {weak_signal_penalty}")
         else:
-            logger.info("Using original non-normalized loss")
+            logger.info(f"Using original non-normalized loss{comparison_note}")
         
         if scales is None:
             self.scales = [512, 1024, 2048, 4096]
@@ -416,37 +419,47 @@ class MultiScaleSpectralLoss:
         total_loss = 0.0
         scale_losses = {}
         total_direction = 0
-        
+        comparison_total_loss = 0.0
+
         for scale_name in self.spectral_data.keys():
             data = self.spectral_data[scale_name]
-            
+
             # Convert to float64 for precision in loss computation
             stft_ch1 = data['ch1'].astype(np.float64)
             stft_ch2 = data['ch2'].astype(np.float64)
-            
+
             # Flatten for loss computation
             stft_x = stft_ch1.flatten()
             stft_y = stft_ch2.flatten()
-            
+
             # Compute loss based on selected method
             if self.use_normalized_loss:
                 scale_loss, direction = self._compute_normalized_loss(stft_x, stft_y)
+                if self.compute_comparison_loss:
+                    comparison_loss, _ = self._compute_original_loss(stft_x, stft_y)
+                    comparison_total_loss += comparison_loss
             else:
                 scale_loss, direction = self._compute_original_loss(stft_x, stft_y)
-            
+                if self.compute_comparison_loss:
+                    comparison_loss, _ = self._compute_normalized_loss(stft_x, stft_y)
+                    comparison_total_loss += comparison_loss
+
             scale_losses[scale_name] = float(scale_loss)
             total_loss += scale_loss
             total_direction += direction
-        
+
         # Average direction across scales
         avg_direction = np.sign(total_direction) if total_direction != 0 else 0
-        
+
         # Store results - ensure all values are serializable
         loss_result = {
             'total_loss': float(total_loss),
             'scale_losses': scale_losses,
             'direction': float(avg_direction),
-            'timestamp': time.time()
+            'timestamp': time.time(),
+            # Diagnostic only - computed with the other (non-active) loss method
+            # on the same data, for side-by-side comparison. Never drives training.
+            'comparison_loss': float(comparison_total_loss)
         }
         
         self.current_losses = loss_result
@@ -574,9 +587,10 @@ class EnhancedAudio(SimpleAudio):
                 use_pyfftw=True,       
                 fft_threads=2,
                 use_normalized_loss=True,              
-                min_signal_threshold=0.1,             
-                weak_signal_penalty=50.0,             
-                normalization_method="l2"):
+                min_signal_threshold=0.1,
+                weak_signal_penalty=50.0,
+                normalization_method="l2",
+                compute_comparison_loss=False):
         """
         Initialize enhanced audio system with synchronized stereo processing.
         """
@@ -591,10 +605,11 @@ class EnhancedAudio(SimpleAudio):
                 window_type=stft_window_type,
                 use_pyfftw=use_pyfftw,  
                 fft_threads=fft_threads,
-                use_normalized_loss=use_normalized_loss,          
-                min_signal_threshold=min_signal_threshold,       
-                weak_signal_penalty=weak_signal_penalty,         
-                normalization_method=normalization_method
+                use_normalized_loss=use_normalized_loss,
+                min_signal_threshold=min_signal_threshold,
+                weak_signal_penalty=weak_signal_penalty,
+                normalization_method=normalization_method,
+                compute_comparison_loss=compute_comparison_loss
             )
         else:
             self.spectral_loss = None

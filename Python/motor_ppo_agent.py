@@ -68,7 +68,8 @@ class MotorPPOAgent:
                  hold_bias=0.5, 
                  initial_temperature=2.0,
                  temperature_decay=0.998,
-                 min_temperature=0.3, 
+                 min_temperature=0.3,
+                 adaptive_temperature=False,
                  normalize_advantages=True,
                  use_gae=True,
                  actor_hidden_layers=[64, 64],     
@@ -95,6 +96,10 @@ class MotorPPOAgent:
         self.temperature_decay = temperature_decay
         self.min_temperature = min_temperature
         self.current_temperature = initial_temperature
+        # When True, motor_environment recommends current_temperature each step
+        # (loss-tied, via get_recommended_temperature) instead of the fixed
+        # per-update decay below - see update().
+        self.adaptive_temperature = adaptive_temperature
         self.min_step_size = min_step_size
         self.max_step_size = max_step_size
         self.magnitude_loss_coef = magnitude_loss_coef
@@ -299,12 +304,14 @@ class MotorPPOAgent:
         # Clear memory
         self.memory.clear()
         
-        # Update exploration temperature
-        self.current_temperature = max(
-            self.min_temperature,
-            self.current_temperature * self.temperature_decay
-        )
-        self.actor.set_temperature(self.current_temperature)
+        # Update exploration temperature - skipped in adaptive mode, where
+        # motor_environment sets current_temperature directly every step instead.
+        if not self.adaptive_temperature:
+            self.current_temperature = max(
+                self.min_temperature,
+                self.current_temperature * self.temperature_decay
+            )
+            self.actor.set_temperature(self.current_temperature)
         
         return np.mean(actor_losses), np.mean(critic_losses)
     

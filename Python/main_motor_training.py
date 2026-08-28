@@ -346,7 +346,8 @@ def load_checkpoint(checkpoint_path: str,
             initial_temperature=config.initial_temperature,
             temperature_decay=config.temperature_decay,
             min_temperature=config.min_temperature,
-            value_coef=config.value_coef,               
+            adaptive_temperature=config.use_adaptive_temperature,
+            value_coef=config.value_coef,
             normalize_advantages=config.normalize_advantages,
             use_gae=config.use_gae,
             actor_hidden_layers=config.actor_hidden_layers,      
@@ -522,7 +523,8 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             use_normalized_loss=config.use_normalized_loss,
             min_signal_threshold=config.min_signal_threshold,
             weak_signal_penalty=config.weak_signal_penalty,
-            normalization_method=config.normalization_method        
+            normalization_method=config.normalization_method,
+            compute_comparison_loss=config.compute_comparison_loss
         )
     
         # 2. Create loss processor
@@ -585,6 +587,23 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             ccw_safety_margin=config.ccw_safety_margin,
             stagnation_threshold=config.stagnation_threshold,
             stagnation_window=config.stagnation_window,
+            stagnation_loss_gate=config.stagnation_loss_gate,
+            stagnation_gate_window=config.stagnation_gate_window,
+            stagnation_gate_percentile=config.stagnation_gate_percentile,
+            initial_temperature=config.initial_temperature,
+            temperature_decay=config.temperature_decay,
+            min_temperature=config.min_temperature,
+            temperature_stagnation_window=config.temperature_stagnation_window,
+            temperature_stagnation_threshold=config.temperature_stagnation_threshold,
+            temperature_boost_factor=config.temperature_boost_factor,
+            temperature_max=config.temperature_max,
+            lr_actor=config.lr_actor,
+            lr_critic=config.lr_critic,
+            lr_patience=config.lr_patience,
+            lr_min_delta=config.lr_min_delta,
+            lr_reduce_factor=config.lr_reduce_factor,
+            lr_min_actor=config.lr_min_actor,
+            lr_min_critic=config.lr_min_critic,
             motor_completion_timeout=config.motor_completion_timeout,
             stabilization_time=config.stabilization_time,
             use_improvement_bonus=config.use_improvement_bonus,
@@ -619,8 +638,18 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             motor_current_ma=config.motor_current_ma,
             enable_stallguard=config.enable_stallguard,
             initial_episode=training_state.episode if resumed else 0,
-            random_range=config.motor_random_calibration_range        
+            random_range=config.motor_random_calibration_range
         )
+
+        # Resuming: sync the environment's adaptive temperature/LR state to what
+        # was actually checkpointed, so it continues from there rather than
+        # restarting at initial_temperature/lr_actor (agent's optimizers already
+        # carry the checkpointed LR via load_state_dict, agent.current_temperature
+        # via the 'temperature' key - see load_checkpoint()).
+        if resumed:
+            env.current_temperature = agent.current_temperature
+            env.current_lr_actor = agent.actor_optimizer.param_groups[0]['lr']
+            env.current_lr_critic = agent.critic_optimizer.param_groups[0]['lr']
 
         string_change_manager = StringChangeManager(
             motor_controller=motor_controller,
@@ -660,7 +689,8 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
                 initial_temperature=config.initial_temperature,
                 temperature_decay=config.temperature_decay,
                 min_temperature=config.min_temperature,
-                value_coef=config.value_coef,               
+                adaptive_temperature=config.use_adaptive_temperature,
+                value_coef=config.value_coef,
                 normalize_advantages=config.normalize_advantages,
                 use_gae=config.use_gae,
                 actor_hidden_layers=config.actor_hidden_layers,      
@@ -814,7 +844,15 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
 
                 if config.use_adaptive_hold_bias and 'recommended_hold_bias' in info:
                     agent.actor.hold_bias = info['recommended_hold_bias']
-                
+
+                if config.use_adaptive_temperature and 'recommended_temperature' in info:
+                    agent.current_temperature = info['recommended_temperature']
+                    agent.actor.set_temperature(agent.current_temperature)
+
+                if config.use_adaptive_learning_rate and 'recommended_lr_actor' in info:
+                    agent.actor_optimizer.param_groups[0]['lr'] = info['recommended_lr_actor']
+                    agent.critic_optimizer.param_groups[0]['lr'] = info['recommended_lr_critic']
+
                 # Store transition with directions and magnitudes separately
                 agent.store_transition(obs, directions, magnitudes, log_prob, reward, value, terminated or truncated)
                 
@@ -838,8 +876,13 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
                         # Legacy logging
                         motors_str = str(info['motors_moved'])
                     
+                    comparison_str = f"ComparisonLoss={info['comparison_loss']:.4f}, " if config.compute_comparison_loss else ""
                     logger.info(f"Episode {training_state.episode}, Step {step}: "
                             f"Loss={info['spectral_loss']:.4f}, "
+                            f"{comparison_str}"
+                            f"Temperature={agent.current_temperature:.3f}, "
+                            f"LR_Actor={agent.actor_optimizer.param_groups[0]['lr']:.2e}, "
+                            f"LR_Critic={agent.critic_optimizer.param_groups[0]['lr']:.2e}, "
                             f"Reward={reward:.2f}, Motors moved: {motors_str}")
                 
                 # Move to next state
@@ -894,8 +937,10 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
                     logger.info(f"  Motor {status['motor']}: pos={status['confirmed_position']}, "
                             f"uncertain={status['uncertain']}")
                 
-            # Adjust learning rate after warm-up
-            if training_state.episode == config.lr_warmup_episodes + 1:
+            # Adjust learning rate after warm-up - superseded by the adaptive
+            # (loss-tied) learning rate above when enabled, since the two would
+            # otherwise fight over agent.*_optimizer.param_groups[0]['lr'].
+            if not config.use_adaptive_learning_rate and training_state.episode == config.lr_warmup_episodes + 1:
                 agent.actor_optimizer.param_groups[0]['lr'] = config.lr_reduced_actor
                 agent.critic_optimizer.param_groups[0]['lr'] = config.lr_reduced_critic
                 logger.info(f"Reduced learning rates after {config.lr_warmup_episodes} episodes: "
