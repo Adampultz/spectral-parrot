@@ -854,6 +854,8 @@ def interactive_motor_positioning(port1, port2, baudrate=115200):
     print("  <motor> test         - Test completion messages")
     print("  test all             - Test completion messages for all motors")
     print("  listen <seconds>     - Just listen for any completion messages")
+    print("  all cw <steps>       - Move all motors clockwise")
+    print("  all ccw <steps>      - Move all motors counter-clockwise")
     print("  all stop             - Stop all motors")
 
     print("\nCalibration Commands:")
@@ -917,7 +919,23 @@ def interactive_motor_positioning(port1, port2, baudrate=115200):
                 motor_controller.stop_motor(0)
                 print("Stopped all motors")
                 continue
-                
+
+            if cmd.startswith("all cw") or cmd.startswith("all ccw"):
+                parts = cmd.split()
+                if len(parts) < 3:
+                    print("Missing steps value")
+                    continue
+                try:
+                    steps = int(parts[2])
+                except ValueError:
+                    print("Invalid number format")
+                    continue
+                direction = 1 if parts[1] == "cw" else 0
+                motor_controller.set_direction(0, direction)
+                motor_controller.move_steps(0, steps)
+                print(f"Moving all motors {'clockwise' if direction else 'counter-clockwise'} by {steps} steps")
+                continue
+
             if cmd.startswith("listen"):
                 parts = cmd.split()
                 duration = completion_time  # default
